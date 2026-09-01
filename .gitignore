@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ML / model artifacts
+*.pt
+*.pth
+*.onnx
+.cache/
+models/
+*.safetensors
+
+# Logs & local data
+*.log
+*.sqlite3
+*.db
+
+# Distribution & testing
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Cursor / generated assets
+.cursor/
+assets/
