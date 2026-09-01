@@ -1,4 +1,3 @@
-from turtle import st
 from services.groq_client import fast_completion
 from graph.state import KizunaState
 
@@ -45,6 +44,6 @@ def route_retrieval_edge(state: KizunaState) -> str:
 def format_history(messages: list) -> str:
     lines = []
     for m in messages:
-        role = "User" if m.role == "human" else "Kizuna"
+        role = "User" if m.type == "human" else "Kizuna"
         lines.append(f"{role}: {m.content}")
     return "\n".join(lines)

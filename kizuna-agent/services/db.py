@@ -1,6 +1,7 @@
 import psycopg2
 from config import DATABASE_URL
 from psycopg2.extras import RealDictCursor
+from datetime import datetime
 
 def _connect():
     return psycopg2.connect(DATABASE_URL)
@@ -95,7 +96,6 @@ def get_relevant_facts(user_id: str, limit: int = 10) -> list[str]:
             )
             rows = cur.fetchall()
     return [r["fact_text"] for r in rows]
-
 
 def get_recent_messages(user_id: str, limit: int = 12) -> list[dict]:
     with _connect() as conn:
