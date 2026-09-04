@@ -1,8 +1,14 @@
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Project-root .env (parent of kizuna-agent/), even when cwd is kizuna-agent
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MAIN_MODEL = "llama-3.3-70b-versatile"  
-GROQ_FAST_MODEL = "llama-3.1-8b-instant"   
+GROQ_MAIN_MODEL = "openai/gpt-oss-120b"
+GROQ_FAST_MODEL = "openai/gpt-oss-20b" 
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")

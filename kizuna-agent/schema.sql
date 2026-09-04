@@ -58,4 +58,3 @@ CREATE POLICY "Users manage their own journal entries" ON journal_entries
 
 CREATE POLICY "Users manage their own relationship facts" ON relationship_facts
     FOR ALL USING (auth.uid() = user_id);
-

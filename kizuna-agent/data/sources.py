@@ -1,0 +1,15 @@
+SOURCES = [
+    {"url": "https://www.nimh.nih.gov/health/publications/so-stressed-out-fact-sheet", "source": "NIMH"},
+    {"url": "https://www.nimh.nih.gov/health/topics/caring-for-your-mental-health", "source": "NIMH"},
+    {"url": "https://www.cdc.gov/mental-health/about/index.html", "source": "CDC"},
+    {"url": "https://www.cdc.gov/emotional-well-being/improve-your-emotional-well-being/index.html", "source": "CDC"},
+    {"url": "https://www.cdc.gov/social-connectedness/about/index.html", "source": "CDC"},
+    {"url": "https://www.cdc.gov/howrightnow/emotion/grief/index.html", "source": "CDC"},
+    {"url": "https://www.cdc.gov/emotional-well-being/managing-difficult-emotions/index.html", "source": "CDC"},
+    {"url": "https://www.cdc.gov/emotional-well-being/managing-difficult-emotions/sadness-depression.html", "source": "CDC"},
+    {"url": "https://www.cdc.gov/howrightnow/emotion/anger/index.html", "source": "CDC"},
+    {"url": "https://www.cdc.gov/howrightnow/emotion/loneliness/index.html", "source": "CDC"},
+    {"url": "https://www.cdc.gov/howrightnow/emotion/worry/index.html", "source": "CDC"},
+    {"url": "https://www.cdc.gov/howrightnow/talk/index.html", "source": "CDC"},
+    {"url": "https://www.samhsa.gov/substance-use/recovery/peer-support-workers/core-competencies", "source": "SAMHSA"},
+]

@@ -9,6 +9,13 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
 with open(_PROMPT_DIR / "chat_system_prompt.txt") as f:
     SYSTEM_PROMPT_TEMPLATE = f.read()
 
+DRIFT_REFRESH_EVERY = 6  
+_DRIFT_REMINDER = (
+    "\n\nREMINDER — check these before replying: 1-3 sentences, casual, lowercase ok. "
+    "No advice unless asked. No clichés. Don't repeat phrasings you've already used. "
+    "If your recent replies have gotten longer or more formal, pull back now."
+)
+
 def generate_response(state: KizunaState) -> dict:
     relationship_context = ""
     if state.get("relationship_facts"):
@@ -43,6 +50,10 @@ def generate_response(state: KizunaState) -> dict:
             "\nBe extra gentle and check in directly on how they're doing "
             "emotionally right now, without being alarmist."
         )
+
+    turn_count = len([m for m in state["messages"] if m.type == "human"])
+    if turn_count > 0 and turn_count % DRIFT_REFRESH_EVERY == 0:
+        system_prompt += _DRIFT_REMINDER
 
     history = format_history(state["messages"])
     response = main_completion(system_prompt=system_prompt, history=history)

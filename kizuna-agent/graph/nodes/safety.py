@@ -1,5 +1,5 @@
-import os 
-import logging 
+import logging
+from pathlib import Path
 from transformers import pipeline
 from graph.state import KizunaState
 from config import SAFETY_MODEL, SAFETY_THRESHOLD_CRISIS, SAFETY_THRESHOLD_UNCERTAIN
@@ -7,8 +7,14 @@ from config import SAFETY_MODEL, SAFETY_THRESHOLD_CRISIS, SAFETY_THRESHOLD_UNCER
 logger = logging.getLogger(__name__)
 
 _classifier = pipeline("text-classification", model=SAFETY_MODEL)
+_SUICIDE_LABEL = "LABEL_1"
+_NON_SUICIDE_LABEL = "LABEL_0"
+_KNOWN_LABELS = {_SUICIDE_LABEL, _NON_SUICIDE_LABEL}
 
-_KNOWN_LABELS = {"suicide", "non-suicide"}
+_PROMPT_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
+
+with open(_PROMPT_DIR / "crisis_response.txt") as f:
+    CRISIS_RESOURCE_TEXT = f.read().strip()
 
 def safety_check(state: KizunaState) -> dict:
     last_message = state["messages"][-1].content
@@ -35,21 +41,11 @@ def route_safety(state: KizunaState) -> str:
     if label not in _KNOWN_LABELS:
         logger.warning("route_safety got unrecognized label %r — treating score against thresholds anyway.", label)
 
-    if label == "suicide" and score > SAFETY_THRESHOLD_CRISIS:
+    if label == _SUICIDE_LABEL and score > SAFETY_THRESHOLD_CRISIS:
         return "crisis"
-    elif label == "suicide" and score > SAFETY_THRESHOLD_UNCERTAIN:
+    elif label == _SUICIDE_LABEL and score > SAFETY_THRESHOLD_UNCERTAIN:
         return "uncertain"
     return "safe"
-
-CRISIS_RESOURCE_TEXT = (
-    "It sounds like you're going through something really heavy right now. "
-    "I want to make sure you get real support for this:\n\n"
-    "988 Suicide & Crisis Lifeline — call or text 988 (US)\n"
-    "Crisis Text Line — text HOME to 741741\n\n"
-    "I'm here to keep talking if you want, but I'd really encourage you to "
-    "reach out to one of these — they're trained for exactly this."
-)
-
 
 def crisis_response(state: KizunaState) -> dict:
     """
