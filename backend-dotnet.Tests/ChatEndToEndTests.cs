@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -95,6 +96,33 @@ public sealed class ChatEndToEndTests : IClassFixture<ChatE2EFixture>
     }
 
     [Fact]
+    public async Task DuplicateIdempotencyKey_WithNoConversationId_NeverOrphansAConversationRow()
+    {
+        // Reproduces the leak found in live verification: a blind retry (the
+        // client never learned the first call's conversation_id, e.g. its
+        // response was dropped) with no conversation_id must not create a
+        // second conversations row just because it omits one.
+        var userId = Guid.NewGuid();
+        await SeedUserAsync(userId, "blind-retry@example.com");
+        var token = _fixture.Jwt.CreateToken(subject: userId.ToString(), email: "blind-retry@example.com");
+
+        var client = _fixture.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var first = await client.PostAsync("/chat", ChatBody(null, "hello", "blind-retry-1"));
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        await first.Content.ReadAsStringAsync();
+        var firstConversationId = first.Headers.GetValues("X-Conversation-Id").Single();
+
+        var second = await client.PostAsync("/chat", ChatBody(null, "hello", "blind-retry-1"));
+        Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
+        await second.Content.ReadAsStringAsync();
+
+        Assert.Equal(firstConversationId, second.Headers.GetValues("X-Conversation-Id").Single());
+        Assert.Equal(1, await _fixture.Database.CountConversationsAsync(userId));
+    }
+
+    [Fact]
     public async Task MismatchedInternalSigningKey_PythonRejects_DotNetSurfacesErrorEvent()
     {
         var userId = Guid.NewGuid();
@@ -165,6 +193,7 @@ public sealed class ChatEndToEndTests : IClassFixture<ChatE2EFixture>
             Environment.SetEnvironmentVariable("INTERNAL_TOKEN_ISSUER", InternalTokenTestDefaults.Issuer);
             Environment.SetEnvironmentVariable("INTERNAL_TOKEN_AUDIENCE", InternalTokenTestDefaults.Audience);
             Environment.SetEnvironmentVariable("AGENT_PYTHON_URL", agent.BaseUrl);
+            Environment.SetEnvironmentVariable("FRONTEND_ORIGIN", "http://localhost:5173");
         }
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)

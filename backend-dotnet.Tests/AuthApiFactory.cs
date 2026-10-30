@@ -24,6 +24,7 @@ public sealed class AuthApiFactory : WebApplicationFactory<Program>
         Environment.SetEnvironmentVariable("INTERNAL_TOKEN_ISSUER", InternalTokenTestDefaults.Issuer);
         Environment.SetEnvironmentVariable("INTERNAL_TOKEN_AUDIENCE", InternalTokenTestDefaults.Audience);
         Environment.SetEnvironmentVariable("AGENT_PYTHON_URL", "http://127.0.0.1:1");
+        Environment.SetEnvironmentVariable("FRONTEND_ORIGIN", "http://localhost:5173");
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)

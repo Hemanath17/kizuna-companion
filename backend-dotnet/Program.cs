@@ -41,6 +41,16 @@ builder.Services.AddHttpClient("agent-python", client =>
     client.BaseAddress = new Uri(RequireEnv("AGENT_PYTHON_URL"));
 });
 
+var frontendOrigin = RequireEnv("FRONTEND_ORIGIN");
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy => policy
+        .WithOrigins(frontendOrigin)
+        .AllowAnyHeader()
+        .AllowAnyMethod()
+        .WithExposedHeaders("X-Conversation-Id", "X-Turn-Id"));
+});
+
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer();
@@ -65,6 +75,7 @@ builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
+app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -109,18 +120,26 @@ app.MapPost("/chat", async (
         requestedConversationId = parsedConversationId;
     }
 
-    // Covers both "doesn't exist" and "belongs to another user" the same
-    // way, so a cross-user probe can't distinguish the two.
-    var conversationId = await chatRepository.EnsureConversationAsync(
-        userId, requestedConversationId, context.RequestAborted);
-    if (conversationId is null)
+    // Checks ownership of requestedConversationId (covering "doesn't exist"
+    // and "belongs to another user" the same way, so a cross-user probe
+    // can't distinguish the two), checks for a duplicate (user_id,
+    // idempotency_key) BEFORE creating anything, and only creates a
+    // conversation when accepting a genuinely new turn -- a blind retry with
+    // no conversation_id never leaks an orphaned conversation row.
+    var accepted = await chatRepository.AcceptUserMessageAsync(
+        userId, requestedConversationId, body.Text, body.IdempotencyKey, context.RequestAborted);
+    if (accepted is null)
     {
         context.Response.StatusCode = StatusCodes.Status404NotFound;
         return;
     }
 
-    var accepted = await chatRepository.AcceptUserMessageAsync(
-        userId, conversationId.Value, body.Text, body.IdempotencyKey, context.RequestAborted);
+    // Set before any body write so both the success stream and the 409 below
+    // carry it; the only way the frontend learns the server-assigned
+    // conversation_id/turn_id on a freshly-created conversation (PLAN.md's
+    // SSE event contract doesn't carry them -- see Step 5 notes).
+    context.Response.Headers["X-Conversation-Id"] = accepted.ConversationId.ToString();
+    context.Response.Headers["X-Turn-Id"] = accepted.TurnId.ToString();
 
     if (!accepted.IsNew)
     {
@@ -131,7 +150,7 @@ app.MapPost("/chat", async (
         {
             turn_id = accepted.TurnId,
             status = accepted.Status,
-            conversation_id = conversationId,
+            conversation_id = accepted.ConversationId,
             sequence_number = accepted.SequenceNumber,
         }, context.RequestAborted);
         return;
@@ -143,7 +162,7 @@ app.MapPost("/chat", async (
     {
         Content = JsonContent.Create(new
         {
-            conversation_id = conversationId,
+            conversation_id = accepted.ConversationId,
             turn_id = accepted.TurnId,
             text = body.Text,
             sequence_number = accepted.SequenceNumber,

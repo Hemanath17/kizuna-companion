@@ -83,6 +83,16 @@ public sealed class TestDatabase : IAsyncDisposable
         return (int)(long)(await command.ExecuteScalarAsync())!;
     }
 
+    public async Task<int> CountConversationsAsync(Guid userId)
+    {
+        await using var connection = new NpgsqlConnection(AdoConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "select count(*) from conversations where user_id = @userId";
+        command.Parameters.AddWithValue("userId", userId);
+        return (int)(long)(await command.ExecuteScalarAsync())!;
+    }
+
     private TestDatabase(string databaseName, string connectionUrl, string adoConnectionString)
     {
         _databaseName = databaseName;

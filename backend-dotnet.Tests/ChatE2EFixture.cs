@@ -31,6 +31,7 @@ public sealed class ChatE2EFixture : WebApplicationFactory<Program>, IAsyncLifet
         Environment.SetEnvironmentVariable("INTERNAL_TOKEN_ISSUER", InternalTokenTestDefaults.Issuer);
         Environment.SetEnvironmentVariable("INTERNAL_TOKEN_AUDIENCE", InternalTokenTestDefaults.Audience);
         Environment.SetEnvironmentVariable("AGENT_PYTHON_URL", Agent.BaseUrl);
+        Environment.SetEnvironmentVariable("FRONTEND_ORIGIN", "http://localhost:5173");
 
         // Forces the host to build now, while the env vars above are current
         // (CollectionBehavior.DisableTestParallelization keeps them that way).
