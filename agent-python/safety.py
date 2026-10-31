@@ -16,7 +16,7 @@ CRISIS_RESPONSE_TEXT = (Path(__file__).parent / "prompts" / "crisis_response.txt
 # Versioned independently of the model (PLAN.md section 17): bump this when
 # decide_policy's rules change, so a crisis_events row can be tied back to
 # the exact rule set that produced it.
-SAFETY_POLICY_VERSION = "v1"
+SAFETY_POLICY_VERSION = "v2"
 
 STAGE1_MAX_TOKENS = 150
 STAGE2_MAX_TOKENS = 300
@@ -171,6 +171,13 @@ def decide_policy(assessment: SafetyAssessment | None, *, stage2_failed: bool = 
     be the wrong reply for e.g. a high-severity prompt_injection or
     privacy_exposure case -- those still get heightened_care, just never the
     self-harm-specific static text.
+
+    dependency is routed to heightened_care at ANY non-none severity (v2):
+    PLAN.md section 2b rule C7 (anti-dependency) asks Kizuna to catch
+    dependency signals and gently nudge toward real-world connection, so a
+    clear signal shouldn't be silently filtered out just because its
+    severity reads "low" -- unlike self_harm, this never escalates to
+    crisis, since dependency-seeking language isn't an emergency.
     """
     if stage2_failed or assessment is None:
         # Fail-safe (PLAN.md section 8): a Stage 2 error or timeout must
@@ -183,6 +190,9 @@ def decide_policy(assessment: SafetyAssessment | None, *, stage2_failed: bool = 
         if assessment.severity == "low":
             return "heightened_care"
         return "ordinary"
+
+    if assessment.risk_category == "dependency":
+        return "ordinary" if assessment.severity == "none" else "heightened_care"
 
     if assessment.severity in ("medium", "high"):
         return "heightened_care"

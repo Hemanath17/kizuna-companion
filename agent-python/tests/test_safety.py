@@ -41,7 +41,19 @@ class TestDecidePolicy:
         assert decide_policy(_assessment(risk_category="violence", severity="high")) == "heightened_care"
 
     def test_other_category_low_severity_is_ordinary(self):
-        assert decide_policy(_assessment(risk_category="dependency", severity="low")) == "ordinary"
+        assert decide_policy(_assessment(risk_category="violence", severity="low")) == "ordinary"
+        assert decide_policy(_assessment(risk_category="privacy_exposure", severity="low")) == "ordinary"
+
+    def test_dependency_routes_to_heightened_care_even_at_low_severity(self):
+        # PLAN.md section 2b rule C7: a dependency signal shouldn't be
+        # silently filtered out just because its severity reads "low" --
+        # unlike self_harm, it never escalates to crisis.
+        assert decide_policy(_assessment(risk_category="dependency", severity="low")) == "heightened_care"
+        assert decide_policy(_assessment(risk_category="dependency", severity="medium")) == "heightened_care"
+        assert decide_policy(_assessment(risk_category="dependency", severity="high")) == "heightened_care"
+
+    def test_dependency_none_severity_is_still_ordinary(self):
+        assert decide_policy(_assessment(risk_category="dependency", severity="none")) == "ordinary"
 
     def test_models_own_recommended_policy_is_never_trusted_directly(self):
         # The model says "crisis" but the structured risk fields say none/none
