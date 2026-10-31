@@ -53,6 +53,9 @@ build/
 htmlcov/
 .mypy_cache/
 
+# Eval run artifacts (generated; the labeled datasets in eval/data/ are kept)
+agent-python/eval/runs/
+
 # Cursor / generated assets
 .cursor/
 assets/

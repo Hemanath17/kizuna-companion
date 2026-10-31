@@ -86,6 +86,13 @@ class TestDatabase:
         finally:
             await conn.close()
 
+    async def superuser_fetch(self, query: str, *args):
+        conn = await asyncpg.connect(self.superuser_dsn)
+        try:
+            return await conn.fetch(query, *args)
+        finally:
+            await conn.close()
+
     async def drop(self) -> None:
         admin = await asyncpg.connect(f"postgresql://{self.admin_user}@127.0.0.1:5432/postgres")
         try:
@@ -153,8 +160,9 @@ async def create_test_database() -> TestDatabase:
             "alter default privileges in schema public grant all on tables to authenticated, anon"
         )
 
-        migration_sql = (_repo_root() / "db" / "0001_schema_v2.sql").read_text()
-        await conn.execute(migration_sql)
+        for migration_file in ("0001_schema_v2.sql", "0002_safety.sql"):
+            migration_sql = (_repo_root() / "db" / migration_file).read_text()
+            await conn.execute(migration_sql)
     finally:
         await conn.close()
 

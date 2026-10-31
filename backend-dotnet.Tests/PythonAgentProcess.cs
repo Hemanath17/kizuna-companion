@@ -43,6 +43,11 @@ public sealed class PythonAgentProcess : IAsyncDisposable
         startInfo.Environment["INTERNAL_TOKEN_ISSUER"] = issuer;
         startInfo.Environment["INTERNAL_TOKEN_AUDIENCE"] = audience;
         startInfo.Environment["GROQ_API_KEY"] = "";
+        // Phase 2 Step 2.1 made Python's live path call real OpenAI; these
+        // integration tests exercise the trust boundary, not generation
+        // quality, so they opt back into the dependency-free EchoProvider
+        // (same behavior as before Step 2.1 existed).
+        startInfo.Environment["AGENT_PROVIDER"] = "echo";
 
         var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Failed to start the Python agent process");

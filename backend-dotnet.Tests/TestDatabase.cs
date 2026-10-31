@@ -156,8 +156,11 @@ public sealed class TestDatabase : IAsyncDisposable
             // against the same starting point as production, not a blank slate.
             await ExecuteAsync(db, "alter default privileges in schema public grant all on tables to authenticated, anon");
 
-            var migrationSql = await File.ReadAllTextAsync(FindMigrationFilePath());
-            await ExecuteAsync(db, migrationSql);
+            foreach (var migrationPath in FindMigrationFilePaths())
+            {
+                var migrationSql = await File.ReadAllTextAsync(migrationPath);
+                await ExecuteAsync(db, migrationSql);
+            }
         }
 
         var connectionUrl = $"postgres://{user}@localhost:5432/{databaseName}";
@@ -171,7 +174,7 @@ public sealed class TestDatabase : IAsyncDisposable
         await command.ExecuteNonQueryAsync();
     }
 
-    private static string FindMigrationFilePath()
+    private static string[] FindMigrationFilePaths()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "PLAN.md")))
@@ -184,7 +187,11 @@ public sealed class TestDatabase : IAsyncDisposable
             throw new InvalidOperationException($"Could not locate repo root (PLAN.md) from {AppContext.BaseDirectory}");
         }
 
-        return Path.Combine(directory.FullName, "db", "0001_schema_v2.sql");
+        return
+        [
+            Path.Combine(directory.FullName, "db", "0001_schema_v2.sql"),
+            Path.Combine(directory.FullName, "db", "0002_safety.sql"),
+        ];
     }
 
     public async ValueTask DisposeAsync()

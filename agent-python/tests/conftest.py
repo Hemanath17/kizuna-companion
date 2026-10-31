@@ -9,6 +9,7 @@ from fastapi import FastAPI
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # make chat/auth/db/providers importable
 
 from chat import router as chat_router  # noqa: E402
+from providers import EchoProvider  # noqa: E402
 
 from tokens import AUDIENCE, ISSUER, SIGNING_KEY  # noqa: E402
 from testdb import create_test_database  # noqa: E402
@@ -36,4 +37,5 @@ def app(pool, monkeypatch):
     application = FastAPI()
     application.include_router(chat_router)
     application.state.pool = pool
+    application.state.provider = EchoProvider()
     return application

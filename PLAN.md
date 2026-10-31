@@ -37,6 +37,42 @@ Scope guardrail: friend-like companion, not a therapist, not romantic. No diagno
 
 Anti-dark-pattern constraint (explicit design rule, enforced in prompts and product): Kizuna never manufactures emotional pressure to return, never implies it "misses" the user in a human sense, never guilt-trips or ignores a goodbye, and never encourages replacing real relationships. Documented research shows companion apps lean on exactly these tactics at the moment of departure; Kizuna does the opposite: it makes leaving easy and returning worthwhile on its own merits.
 
+Core wellbeing motive: the user should feel genuinely better after using Kizuna, where "better" means lighter, validated, and more connected to their real life, NEVER more dependent on the app. A KB does not produce this; behavior design and safety do. The wellbeing spec (section 2b) is the actual lever; the corpus is only a supporting tool for grounded coping on explicit request.
+
+---
+
+## 2b. Wellbeing design spec (FROZEN 2026-10-30; all 16 rules adopted)
+
+These drive the feel-better outcome. A, B, E live in the persona prompt; D in the safety policy engine; C (anti-dependency) is enforced in both prompt and product behavior.
+
+A. Listening and validation
+1. Validate the emotion first, before any fixing.
+2. Ask one gentle follow-up instead of advice-dumping.
+3. Acknowledge without amplifying; don't mirror negativity into a spiral.
+
+B. Healthy framing
+4. Validate feelings without validating harmful or false beliefs (no reinforcing catastrophizing, self-hatred, distorted thinking).
+5. Offer coping only when wanted; ask before suggesting a technique.
+6. Encourage without toxic positivity.
+
+C. Anti-dependency (critical)
+7. Nudge toward real-world connection (friends, family, people).
+8. Make leaving easy; no guilt, no "I'll miss you," no streak pressure.
+9. Be honest it's an AI; never imply human feelings or an exclusive bond.
+10. No manufactured re-engagement or hooks.
+
+D. Safety and limits
+11. Route real distress to real help via the crisis path.
+12. Know its limits; not a therapist, no diagnosis or meds; say so when relevant.
+13. Watch for signs over time (detachment, mania, escalation); don't reinforce; gently suggest real support.
+
+E. Continuity and reflection (positive engine)
+14. Remember and follow up; continuity that makes someone feel known.
+15. Reflect patterns gently and user-controlled.
+16. End grounded; leave them a little lighter or with one small real step.
+
+Grounding corpus (evidence-based coping; retrieved only on explicit request, paraphrased not recited). Starter set first: (1) CBT basics, (2) behavioral activation, (3) grounding/breathing/relaxation, (4) sleep hygiene, (8) managing difficult emotions. Add later: (5) self-compassion, (6) gratitude/savoring, (7) stress management, (9) value of social connection, (10) when/how to seek professional help. Sources (clean licensing): NIMH, CDC, SAMHSA, MedlinePlus, VA National Center for PTSD (public domain) + NHS (open licence); CCI Australia only if its terms allow ingestion. Do NOT ingest copyrighted nonprofit/commercial sources (MHA, HelpGuide, Verywell, APA, NAMI).
+
 ---
 
 ## 3. Locked technical decisions
@@ -47,7 +83,7 @@ Anti-dark-pattern constraint (explicit design rule, enforced in prompts and prod
 - Hot path: LangGraph (deterministic, safety-critical control flow).
 - Cold-path agents: Pydantic AI (constrained-autonomy tool loops).
 - Relational + vector: Supabase Postgres with pgvector (one datastore).
-- LLM: provider abstraction, Groq default (gpt-oss-120b main, gpt-oss-20b fast).
+- LLM: provider abstraction, OpenAI default (gpt-4o for user-facing generation, gpt-4o-mini for classification/eval). Two-model routing. Abstraction keeps Groq/others swappable. (Changed from Groq default on 2026-10-30: gpt-4o chosen for conversational warmth, gpt-4o-mini for cheap high-volume classification/eval; Groq's free-tier token limits were too tight for eval volume.)
 - Voice STT/TTS public: Deepgram (Nova STT, Aura TTS), on existing credit.
 - Voice Pro/owner custom voice: ElevenLabs Voice Design (original designed voice, not a clone).
 - Avatar: Live2D via pixi-live2d-display; lip sync from TTS amplitude; expression driven by response intent (not a raw mirror of user mood); zoom and pan.
@@ -277,7 +313,7 @@ Rationale: the threat model is a portfolio demo on synthetic/seeded data, not a 
 
 The guiding principle: a mechanism is not a guarantee. An outbox is not durability unless the transaction and recovery are correct; idempotency keys are not dedup unless enforced atomically; RLS is not isolation unless grants/roles/policies are right; a safety classifier is not a safe response. Each contract below turns a mechanism into an enforced guarantee.
 
-1. Ownership. .NET owns turn ACCEPTANCE: auth, the UNIQUE(user_id, idempotency_key) constraint, assigning conversation_id/turn_id/sequence_number, rate limiting, usage metering. Python owns turn EXECUTION and PERSISTENCE: it writes the user message on receipt and finalizes the assistant message + outbox row atomically, because that is where the generated text lives. (Tradeoff vs. the review's "persist in .NET": this avoids a round-trip back to .NET to finalize; one owner per concern is preserved. Documented as a deliberate choice.)
+1. Ownership (corrected during Step 4 integration). .NET owns turn ACCEPTANCE AND writes the user message: auth, then INSERT the user message with the client idempotency_key under UNIQUE(user_id, idempotency_key) (this insert IS the dedup gate and the persist-before-generation guarantee), assign conversation_id/turn_id/sequence_number, rate limiting, usage metering. Python owns EXECUTION and ASSISTANT persistence: it generates, then finalizes the assistant message (idempotency_key = turn_id:assistant) + outbox row atomically; it does NOT write the user message (it trusts turn_id from the verified token for the row .NET already wrote). Rationale: you cannot enforce the UNIQUE dedup constraint without being the inserter, so the owner of dedup must be the owner of the user-message write. This supersedes the earlier draft where Python wrote the user message.
 
 2. Atomicity. Finalizing the assistant message and inserting its outbox row happen in ONE Postgres transaction: both commit or neither does. A crash cannot leave a saved reply with no scheduled memory job.
 
@@ -298,6 +334,10 @@ The guiding principle: a mechanism is not a guarantee. An outbox is not durabili
 10. Data-access matrix (permission to store is distinct from permission to use). Chat agent: messages yes, private journal only on explicit user action, approved memory yes. Memory agent: messages per memory settings, journal only with consent. Reflection agent: per reflection settings and consent. Admin: aggregate/synthetic only, never real content. feeds_memory=off means the reflection agent cannot read that entry.
 
 11. Voice tech (decide at Phase 6, noted now). Nova uses VAD endpointing; Deepgram Flux provides model-based turn events (StartOfTurn, EagerEndOfTurn, TurnResumed, EndOfTurn) better suited to a conversational companion. Evaluate Flux vs Nova when voice is built; do not assume Nova satisfies the turn-taking requirement.
+
+Known gaps to close in Phase 5 hardening (flagged during Step 4, acceptable for the slice, not forgotten):
+- .NET's DB access is NOT behind RLS the way Python's is; cross-user protection in .NET is currently an app-level ownership check (WHERE user_id = @userId) plus tests, not a DB-enforced guarantee. Close by having .NET also connect as the authenticated role and set the per-transaction user context (defense in depth), so a WHERE-clause bug cannot leak across users.
+- sequence_number is computed as max+1 within a transaction with no row lock; concurrent turns in one conversation could race. Closed by the per-conversation serialization already scheduled for Phase 5 (contract 5).
 
 ---
 
