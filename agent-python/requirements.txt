@@ -5,6 +5,8 @@ asyncpg==0.32.0
 certifi==2026.10.23
 click==8.5.0
 fastapi==0.162.0
+genai-prices==0.2.1
+griffelib==2.4.1
 h11==0.16.0
 httpcore==1.0.9
 httpcore2==2.16.0
@@ -14,10 +16,13 @@ httpx2==2.16.0
 idna==3.20
 iniconfig==2.3.1
 jiter==0.18.0
+logfire-api==5.4.0
 openai==3.42.0
 opentelemetry-api==1.45.1
 packaging==26.3
 pluggy==1.7.0
+pydantic-ai-slim==2.65.0
+pydantic-graph==2.65.0
 pydantic==2.14.1
 pydantic_core==2.50.1
 PyJWT==2.15.1

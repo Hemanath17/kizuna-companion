@@ -64,7 +64,7 @@ public sealed class ChatEndToEndTests : IClassFixture<ChatE2EFixture>
         findTurn.CommandText = "select turn_id from messages where conversation_id = @id and role = 'user'";
         findTurn.Parameters.AddWithValue("id", conversationId);
         var turnId = (Guid)(await findTurn.ExecuteScalarAsync())!;
-        Assert.Equal(1, await _fixture.Database.CountOutboxRowsAsync(turnId));
+        Assert.Equal(2, await _fixture.Database.CountOutboxRowsAsync(turnId));
     }
 
     [Fact]
@@ -92,7 +92,7 @@ public sealed class ChatEndToEndTests : IClassFixture<ChatE2EFixture>
         Assert.Single(messages, m => m.Role == "assistant");
 
         var turnId = Guid.Parse(secondBody.GetProperty("turn_id").GetString()!);
-        Assert.Equal(1, await _fixture.Database.CountOutboxRowsAsync(turnId));
+        Assert.Equal(2, await _fixture.Database.CountOutboxRowsAsync(turnId));
     }
 
     [Fact]

@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth import InternalClaims, require_chat_generate
+from context_builder import format_memory_block, select_memories
 from db import user_scoped_transaction
 from generation import stream_reply_with_fallback
 from hydrate import load_conversation_style, load_recent_messages, load_user_message_id
@@ -53,10 +54,13 @@ async def _insert_assistant_message_and_outbox(
             """,
             str(uuid4()), user_id, conversation_id, turn_id, f"{turn_id}:assistant", sequence_number, content,
         )
+        # Two distinct cold-path jobs per turn (ARCHITECTURE.md 5.4): emotion
+        # tagging and the memory pipeline are independent, separately
+        # retryable units of work, not one bundled "process_memory" job.
         await conn.execute(
             """
             insert into outbox (turn_id, user_id, job_type, status)
-            values ($1, $2, 'process_memory', 'pending')
+            values ($1, $2, 'tag_emotion', 'pending'), ($1, $2, 'extract_memory', 'pending')
             """,
             turn_id, user_id,
         )
@@ -121,7 +125,8 @@ async def _stream_chat(
                 return
 
             constraints = HEIGHTENED_CARE_CONSTRAINTS if outcome.policy_outcome == "heightened_care" else ""
-            system = render_persona_prompt(conversation_style, constraints)
+            memories = await select_memories(pool, claims.user_id, provider, body.text)
+            system = render_persona_prompt(conversation_style, constraints, format_memory_block(memories))
 
             tokens: list[str] = []
             async for token in stream_reply_with_fallback(provider, system, window, tracer):

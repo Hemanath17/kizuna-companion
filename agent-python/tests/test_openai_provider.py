@@ -73,3 +73,26 @@ async def test_token_trace_captures_both_generation_and_utility_calls():
     assert (utility_entry.prompt_tokens, utility_entry.completion_tokens) == (5, 1)
     assert tracer.total_prompt_tokens == 15
     assert tracer.total_completion_tokens == 3
+
+
+@pytest.mark.asyncio
+async def test_embed_routes_to_embedding_model_and_traces_usage():
+    fake_client = FakeAsyncOpenAIClient(
+        embed_fn=lambda kwargs: ([0.1, 0.2, 0.3], SimpleNamespace(prompt_tokens=4)),
+    )
+    provider = OpenAIProvider(client=fake_client, embedding_model="text-embedding-3-small")
+    tracer = TokenTrace(turn_id="turn-1")
+
+    vector = await provider.embed("I have a big interview Friday", node="memory_embedding", tracer=tracer)
+
+    assert vector == [0.1, 0.2, 0.3]
+    assert fake_client.embedding_calls[0]["model"] == "text-embedding-3-small"
+    assert fake_client.embedding_calls[0]["input"] == "I have a big interview Friday"
+    assert len(tracer.entries) == 1
+    entry = tracer.entries[0]
+    assert (entry.node, entry.model, entry.prompt_tokens, entry.completion_tokens) == (
+        "memory_embedding",
+        "text-embedding-3-small",
+        4,
+        0,
+    )

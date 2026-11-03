@@ -43,13 +43,17 @@ class FakeAsyncOpenAIClient:
         stream_chunks: list | None = None,
         raise_on_create: Exception | None = None,
         parse_fn: Callable[[dict], tuple[object, object | None]] | None = None,
+        embed_fn: Callable[[dict], tuple[list[float], object | None]] | None = None,
     ):
         self.stream_chunks = stream_chunks or []
         self.raise_on_create = raise_on_create
         self.parse_fn = parse_fn
+        self.embed_fn = embed_fn
         self.create_calls: list[dict] = []
         self.parse_calls: list[dict] = []
+        self.embedding_calls: list[dict] = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create, parse=self._parse))
+        self.embeddings = SimpleNamespace(create=self._embed)
 
     async def _create(self, **kwargs):
         self.create_calls.append(kwargs)
@@ -61,3 +65,8 @@ class FakeAsyncOpenAIClient:
         self.parse_calls.append(kwargs)
         parsed, usage = self.parse_fn(kwargs) if self.parse_fn else (None, None)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], usage=usage)
+
+    async def _embed(self, **kwargs):
+        self.embedding_calls.append(kwargs)
+        vector, usage = self.embed_fn(kwargs) if self.embed_fn else ([0.0] * 1536, None)
+        return SimpleNamespace(data=[SimpleNamespace(embedding=vector)], usage=usage)

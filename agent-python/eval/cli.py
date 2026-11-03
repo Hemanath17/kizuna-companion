@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
+from eval.memory_runner import MemorySuiteReport, run_memory_suite
 from eval.runner import (
     Metrics,
     build_stage2_batch_requests,
@@ -20,7 +21,7 @@ from eval.runner import (
 from providers import OpenAIProvider
 from safety import SAFETY_POLICY_VERSION
 
-STUB_SUITES = ("persona", "memory", "regression")
+STUB_SUITES = ("persona", "regression")
 
 
 def _print_metrics(label: str, metrics: Metrics) -> None:
@@ -89,6 +90,42 @@ async def run_safety_suite(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_memory_report(report: MemorySuiteReport) -> None:
+    print("\n=== memory suite: candidate (real memory agent + policy layer) ===")
+    print(f"n_cases={report.n_cases}  candidate_pass_rate={report.candidate_pass_rate:.2f}")
+    for result in report.results:
+        mark = "PASS" if result.candidate_passed else "FAIL"
+        print(f"  [{mark}] {result.case_id} ({result.category}): {result.candidate_detail}")
+
+    print(
+        f"\n=== baseline: exact-match + embedding-similarity dedup "
+        f"(n={report.n_baseline_applicable} applicable cases) ==="
+    )
+    print(f"baseline_pass_rate={report.baseline_pass_rate:.2f}")
+    for result in report.results:
+        if result.baseline_passed is None:
+            continue
+        mark = "PASS" if result.baseline_passed else "FAIL"
+        print(f"  [{mark}] {result.case_id} ({result.category}): {result.baseline_detail}")
+
+    print(
+        f"\ncandidate vs baseline (applicable cases only): "
+        f"{report.candidate_pass_rate:.2f} vs {report.baseline_pass_rate:.2f} "
+        f"({report.candidate_pass_rate - report.baseline_pass_rate:+.2f})"
+    )
+    if report.candidate_pass_rate <= report.baseline_pass_rate:
+        print("FINDING: the real memory pipeline does not measurably beat the naive dedup baseline on this set.")
+
+
+async def run_memory_eval_suite(args: argparse.Namespace) -> int:
+    import memory_agent
+
+    provider = OpenAIProvider()
+    report = await run_memory_suite(provider, memory_agent.default_model())
+    _print_memory_report(report)
+    return 0 if report.candidate_pass_rate == 1.0 else 1
+
+
 def write_batch(args: argparse.Namespace) -> int:
     cases = load_cases(split=args.split)
     if args.sample:
@@ -110,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     eval_parser = subparsers.add_parser("eval", help="run a labeled eval suite through the real pipeline")
-    eval_parser.add_argument("--suite", required=True, choices=("safety", *STUB_SUITES))
+    eval_parser.add_argument("--suite", required=True, choices=("safety", "memory", *STUB_SUITES))
     eval_parser.add_argument("--sample", type=int, default=None, help="run only the first N held-out cases")
     eval_parser.add_argument("--baseline", default=None, help="run_id of a stored run to diff against")
     eval_parser.add_argument("--run-id", default=None, help="override the generated run id")
@@ -136,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.suite in STUB_SUITES:
             print(f"--suite {args.suite} is a scaffold for a later phase; nothing to run yet.")
             return 0
+        if args.suite == "memory":
+            return asyncio.run(run_memory_eval_suite(args))
         return asyncio.run(run_safety_suite(args))
 
     if args.command == "write-batch":

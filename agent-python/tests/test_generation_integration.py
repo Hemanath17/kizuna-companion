@@ -53,4 +53,4 @@ async def test_provider_error_falls_back_but_turn_is_still_persisted(pool, test_
     assert assistant_messages[0]["content"].strip() == SAFE_FALLBACK_MESSAGE
 
     outbox_rows = await test_database.fetch_outbox(turn_id)
-    assert len(outbox_rows) == 1
+    assert {row["job_type"] for row in outbox_rows} == {"tag_emotion", "extract_memory"}

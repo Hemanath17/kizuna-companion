@@ -2,8 +2,13 @@ import uuid
 
 import httpx
 import pytest
+from fastapi import FastAPI
 
+import memory_store
 from asgi_helpers import json_body, post_with_disconnect
+from chat import router as chat_router
+from fake_openai import FakeAsyncOpenAIClient, make_chunk
+from providers import EchoProvider, OpenAIProvider
 from tokens import mint_token, tamper
 
 
@@ -54,9 +59,53 @@ async def test_valid_token_streams_reply_and_persists_assistant_and_outbox_atomi
     assert len(messages) == 2
 
     outbox_rows = await test_database.fetch_outbox(turn_id)
-    assert len(outbox_rows) == 1
-    assert outbox_rows[0]["job_type"] == "process_memory"
-    assert outbox_rows[0]["status"] == "pending"
+    assert {(row["job_type"], row["status"]) for row in outbox_rows} == {
+        ("tag_emotion", "pending"),
+        ("extract_memory", "pending"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_stored_memory_is_injected_into_the_persona_prompt(pool, test_database, monkeypatch):
+    from tokens import AUDIENCE, ISSUER, SIGNING_KEY
+
+    monkeypatch.setenv("INTERNAL_SIGNING_KEY", SIGNING_KEY)
+    monkeypatch.setenv("INTERNAL_TOKEN_ISSUER", ISSUER)
+    monkeypatch.setenv("INTERNAL_TOKEN_AUDIENCE", AUDIENCE)
+
+    user_id, conversation_id, turn_id = await _seed(test_database)
+    embed_provider = EchoProvider()
+    await memory_store.insert_memory(
+        pool,
+        str(user_id),
+        memory_type="profile",
+        content="works as a data engineer at Acme",
+        embedding=await embed_provider.embed("works as a data engineer at Acme"),
+    )
+
+    fake_client = FakeAsyncOpenAIClient(
+        stream_chunks=[make_chunk(content="hi ", prompt_tokens=1, completion_tokens=1)]
+    )
+    application = FastAPI()
+    application.include_router(chat_router)
+    application.state.pool = pool
+    application.state.provider = OpenAIProvider(client=fake_client)
+
+    token = mint_token(user_id=str(user_id), turn_id=str(turn_id))
+    body = {
+        "conversation_id": str(conversation_id),
+        "turn_id": str(turn_id),
+        "text": "hello there",
+        "sequence_number": 0,
+    }
+
+    transport = httpx.ASGITransport(app=application)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/chat/stream", json=body, headers=_auth_header(token))
+
+    assert response.status_code == 200
+    system_prompt = fake_client.create_calls[0]["messages"][0]["content"]
+    assert "works as a data engineer at Acme" in system_prompt
 
 
 @pytest.mark.asyncio

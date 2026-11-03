@@ -11,7 +11,9 @@ CONVERSATION_STYLE_DESCRIPTIONS = {
 }
 
 
-def render_persona_prompt(conversation_style: str | None, constraints: str = "") -> str:
+def render_persona_prompt(conversation_style: str | None, constraints: str = "", memory_context: str = "") -> str:
     style_key = conversation_style if conversation_style in CONVERSATION_STYLE_DESCRIPTIONS else DEFAULT_CONVERSATION_STYLE
     style_description = CONVERSATION_STYLE_DESCRIPTIONS[style_key]
-    return _PERSONA_TEMPLATE.format(conversation_style=style_description, constraints=constraints)
+    return _PERSONA_TEMPLATE.format(
+        conversation_style=style_description, constraints=constraints, memory_context=memory_context
+    )

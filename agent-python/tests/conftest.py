@@ -29,6 +29,13 @@ async def pool(test_database):
     await p.close()
 
 
+@pytest_asyncio.fixture
+async def worker_pool(test_database):
+    p = await asyncpg.create_pool(test_database.worker_dsn)
+    yield p
+    await p.close()
+
+
 @pytest.fixture
 def app(pool, monkeypatch):
     monkeypatch.setenv("INTERNAL_SIGNING_KEY", SIGNING_KEY)

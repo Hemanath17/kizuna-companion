@@ -83,6 +83,48 @@ public sealed class TestDatabase : IAsyncDisposable
         return (int)(long)(await command.ExecuteScalarAsync())!;
     }
 
+    public async Task<Guid> SeedMemoryAsync(
+        Guid userId, string content, string memoryType = "profile", bool isSensitive = false, bool pendingConfirmation = false)
+    {
+        var memoryId = Guid.NewGuid();
+        await using var connection = new NpgsqlConnection(AdoConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            insert into memory (id, user_id, memory_type, content, is_sensitive, pending_confirmation)
+            values (@id, @userId, @memoryType, @content, @isSensitive, @pendingConfirmation)
+            """;
+        command.Parameters.AddWithValue("id", memoryId);
+        command.Parameters.AddWithValue("userId", userId);
+        command.Parameters.AddWithValue("memoryType", memoryType);
+        command.Parameters.AddWithValue("content", content);
+        command.Parameters.AddWithValue("isSensitive", isSensitive);
+        command.Parameters.AddWithValue("pendingConfirmation", pendingConfirmation);
+        await command.ExecuteNonQueryAsync();
+        return memoryId;
+    }
+
+    public async Task<(string Status, bool HasEmbedding)?> FetchMemoryStatusAsync(Guid id)
+    {
+        await using var connection = new NpgsqlConnection(AdoConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "select status, embedding is not null from memory where id = @id";
+        command.Parameters.AddWithValue("id", id);
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? (reader.GetString(0), reader.GetBoolean(1)) : null;
+    }
+
+    public async Task<int> CountTombstonesAsync(Guid userId)
+    {
+        await using var connection = new NpgsqlConnection(AdoConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "select count(*) from memory_tombstones where user_id = @userId";
+        command.Parameters.AddWithValue("userId", userId);
+        return (int)(long)(await command.ExecuteScalarAsync())!;
+    }
+
     public async Task<int> CountConversationsAsync(Guid userId)
     {
         await using var connection = new NpgsqlConnection(AdoConnectionString);
@@ -191,6 +233,10 @@ public sealed class TestDatabase : IAsyncDisposable
         [
             Path.Combine(directory.FullName, "db", "0001_schema_v2.sql"),
             Path.Combine(directory.FullName, "db", "0002_safety.sql"),
+            Path.Combine(directory.FullName, "db", "0003_memory.sql"),
+            Path.Combine(directory.FullName, "db", "0004_memory_source_kind.sql"),
+            Path.Combine(directory.FullName, "db", "0005_worker_lease.sql"),
+            Path.Combine(directory.FullName, "db", "0006_worker_memory_access.sql"),
         ];
     }
 

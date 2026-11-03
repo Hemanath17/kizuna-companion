@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import os
+import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import TypeVar
@@ -15,6 +17,10 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 # per key, separate from the automatic longest-common-prefix caching. One
 # fixed key for the persona prefix is "enabling" it per PLAN's instruction.
 PERSONA_CACHE_KEY = "kizuna-persona-v1"
+
+# Matches db/0003_memory.sql's memory.embedding / memory_tombstones.embedding
+# column width (vector(1536)) -- text-embedding-3-small's native dimension.
+EMBEDDING_DIM = 1536
 
 
 class ProviderInterface(ABC):
@@ -41,6 +47,16 @@ class ProviderInterface(ABC):
         tracer: TokenTrace | None = None,
     ) -> SchemaT:
         """Return a parsed, schema-validated structured response."""
+
+    @abstractmethod
+    async def embed(
+        self,
+        text: str,
+        *,
+        node: str = "memory_embedding",
+        tracer: TokenTrace | None = None,
+    ) -> list[float]:
+        """Return the embedding vector for text."""
 
 
 class EchoProvider(ProviderInterface):
@@ -80,6 +96,30 @@ class EchoProvider(ProviderInterface):
             "fake ProviderInterface in tests that need complete_structured."
         )
 
+    async def embed(
+        self,
+        text: str,
+        *,
+        node: str = "memory_embedding",
+        tracer: TokenTrace | None = None,
+    ) -> list[float]:
+        # A deterministic hashing-trick bag-of-words vector, not a real
+        # embedding model: no network, no API key, but still rewards word
+        # overlap with higher cosine similarity, which is what memory_store's
+        # tombstone/search tests need from a fake. Real similarity comes from
+        # OpenAIProvider in production.
+        words = re.findall(r"[a-z0-9]+", text.lower())
+        vector = [0.0] * EMBEDDING_DIM
+        for word in words:
+            index = int(hashlib.md5(word.encode("utf-8")).hexdigest(), 16) % EMBEDDING_DIM
+            vector[index] += 1.0
+        norm = sum(v * v for v in vector) ** 0.5
+        if tracer:
+            tracer.record(node, "echo", prompt_tokens=0, completion_tokens=0)
+        if norm == 0:
+            return vector
+        return [v / norm for v in vector]
+
 
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
@@ -94,12 +134,14 @@ class OpenAIProvider(ProviderInterface):
         client: AsyncOpenAI | None = None,
         generation_model: str | None = None,
         utility_model: str | None = None,
+        embedding_model: str | None = None,
     ):
         # Accepting an injected client is what lets tests mock the OpenAI
         # client itself rather than monkeypatching the SDK module.
         self._client = client or AsyncOpenAI(api_key=_require_env("OPENAI_API_KEY"))
         self._generation_model = generation_model or os.environ.get("GENERATION_MODEL", "gpt-4o")
         self._utility_model = utility_model or os.environ.get("UTILITY_MODEL", "gpt-4o-mini")
+        self._embedding_model = embedding_model or os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 
     @property
     def utility_model(self) -> str:
@@ -155,3 +197,16 @@ class OpenAIProvider(ProviderInterface):
         if parsed is None:
             raise ValueError(f"{self._utility_model} did not return a {schema.__name__}-conforming response")
         return parsed
+
+    async def embed(
+        self,
+        text: str,
+        *,
+        node: str = "memory_embedding",
+        tracer: TokenTrace | None = None,
+    ) -> list[float]:
+        response = await self._client.embeddings.create(model=self._embedding_model, input=text)
+        if tracer:
+            prompt_tokens = response.usage.prompt_tokens if response.usage else 0
+            tracer.record(node, self._embedding_model, prompt_tokens, 0)
+        return list(response.data[0].embedding)

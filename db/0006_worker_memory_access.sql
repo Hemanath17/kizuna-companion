@@ -1,0 +1,12 @@
+-- Kizuna schema v2, Phase 3 Step 3.3 (memory agent + policy layer). See
+-- PLAN.md sections 6, 16 and ARCHITECTURE.md section 5.5.
+--
+-- The worker's own BYPASSRLS identity (0005) is for outbox/messages, which
+-- it must see across every user. Memory is different: it stays per-user
+-- RLS-scoped even when the worker is the caller, the same guarantee the hot
+-- path gets, rather than handing the worker blanket access to everyone's
+-- memory. kizuna_worker has no direct grant on memory/memory_tombstones
+-- (0001's "alter default privileges" only covers authenticated/anon), so
+-- the only way in is to explicitly become 'authenticated' per call -- which
+-- is exactly what memory_store.py's user_scoped_transaction already does.
+grant authenticated to kizuna_worker;

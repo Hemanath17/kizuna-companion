@@ -24,6 +24,9 @@ class TestDatabase:
     # DSN the app pool connects with: a login role that does NOT bypass RLS,
     # the same shape of connection a real deployment would use.
     agent_dsn: str
+    # DSN the worker connects with: BYPASSRLS, since it must see every
+    # user's pending outbox/message rows, not just one.
+    worker_dsn: str
 
     async def seed_auth_user(self, user_id: uuid.UUID) -> None:
         conn = await asyncpg.connect(self.superuser_dsn)
@@ -82,6 +85,38 @@ class TestDatabase:
         try:
             return await conn.fetch(
                 "select job_type, status from outbox where turn_id = $1", turn_id
+            )
+        finally:
+            await conn.close()
+
+    async def seed_outbox_job(
+        self, turn_id: uuid.UUID, user_id: uuid.UUID, job_type: str, status: str = "pending"
+    ) -> uuid.UUID:
+        conn = await asyncpg.connect(self.superuser_dsn)
+        try:
+            return await conn.fetchval(
+                """
+                insert into outbox (id, turn_id, user_id, job_type, status)
+                values (gen_random_uuid(), $1, $2, $3, $4)
+                returning id
+                """,
+                turn_id, user_id, job_type, status,
+            )
+        finally:
+            await conn.close()
+
+    async def fetch_outbox_row(self, job_id: uuid.UUID):
+        conn = await asyncpg.connect(self.superuser_dsn)
+        try:
+            return await conn.fetchrow("select * from outbox where id = $1", job_id)
+        finally:
+            await conn.close()
+
+    async def expire_lease(self, job_id: uuid.UUID) -> None:
+        conn = await asyncpg.connect(self.superuser_dsn)
+        try:
+            await conn.execute(
+                "update outbox set lease_expires_at = now() - interval '1 second' where id = $1", job_id
             )
         finally:
             await conn.close()
@@ -160,11 +195,21 @@ async def create_test_database() -> TestDatabase:
             "alter default privileges in schema public grant all on tables to authenticated, anon"
         )
 
-        for migration_file in ("0001_schema_v2.sql", "0002_safety.sql"):
+        for migration_file in (
+            "0001_schema_v2.sql",
+            "0002_safety.sql",
+            "0003_memory.sql",
+            "0004_memory_source_kind.sql",
+            "0005_worker_lease.sql",
+            "0006_worker_memory_access.sql",
+        ):
             migration_sql = (_repo_root() / "db" / migration_file).read_text()
             await conn.execute(migration_sql)
     finally:
         await conn.close()
 
     agent_dsn = f"postgresql://kizuna_agent@127.0.0.1:5432/{name}"
-    return TestDatabase(name=name, admin_user=admin_user, superuser_dsn=superuser_dsn, agent_dsn=agent_dsn)
+    worker_dsn = f"postgresql://kizuna_worker@127.0.0.1:5432/{name}"
+    return TestDatabase(
+        name=name, admin_user=admin_user, superuser_dsn=superuser_dsn, agent_dsn=agent_dsn, worker_dsn=worker_dsn
+    )

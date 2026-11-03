@@ -27,6 +27,7 @@ builder.Services.AddSingleton<JwksKeyProvider>();
 builder.Services.AddSingleton(NpgsqlDataSource.Create(PostgresConnectionString.FromUrl(RequireEnv("DATABASE_URL"))));
 builder.Services.AddSingleton<IProfileRepository, ProfileRepository>();
 builder.Services.AddSingleton<IChatRepository, ChatRepository>();
+builder.Services.AddSingleton<IMemoryRepository, MemoryRepository>();
 
 builder.Services.AddSingleton(new InternalTokenOptions
 {
@@ -221,7 +222,79 @@ app.MapPost("/chat", async (
     }
 }).RequireAuthorization();
 
+app.MapGet("/memory", async (ClaimsPrincipal user, IMemoryRepository memories, CancellationToken cancellationToken) =>
+{
+    var sub = user.FindFirst("sub")?.Value;
+    if (sub is null || !Guid.TryParse(sub, out var userId))
+    {
+        return Results.Unauthorized();
+    }
+
+    var records = await memories.ListAsync(userId, cancellationToken);
+    return Results.Ok(records.Select(MemoryResponse));
+}).RequireAuthorization();
+
+app.MapPatch("/memory/{id}", async (
+    string id,
+    MemoryPatchRequest body,
+    ClaimsPrincipal user,
+    IMemoryRepository memories,
+    CancellationToken cancellationToken) =>
+{
+    var sub = user.FindFirst("sub")?.Value;
+    if (sub is null || !Guid.TryParse(sub, out var userId))
+    {
+        return Results.Unauthorized();
+    }
+    if (!Guid.TryParse(id, out var memoryId))
+    {
+        return Results.NotFound();
+    }
+
+    // Correct (content given) and approve (content omitted) are the same
+    // call: both are the user confirming this fact, so both set
+    // user_verified -- see MemoryRepository.CorrectOrApproveAsync.
+    var updated = await memories.CorrectOrApproveAsync(userId, memoryId, body.Content, cancellationToken);
+    return updated is null ? Results.NotFound() : Results.Ok(MemoryResponse(updated));
+}).RequireAuthorization();
+
+app.MapDelete("/memory/{id}", async (
+    string id,
+    ClaimsPrincipal user,
+    IMemoryRepository memories,
+    CancellationToken cancellationToken) =>
+{
+    var sub = user.FindFirst("sub")?.Value;
+    if (sub is null || !Guid.TryParse(sub, out var userId))
+    {
+        return Results.Unauthorized();
+    }
+    if (!Guid.TryParse(id, out var memoryId))
+    {
+        return Results.NotFound();
+    }
+
+    var forgotten = await memories.ForgetAsync(userId, memoryId, cancellationToken);
+    return forgotten ? Results.NoContent() : Results.NotFound();
+}).RequireAuthorization();
+
 app.Run();
+
+static object MemoryResponse(MemoryRecord memory) => new
+{
+    id = memory.Id,
+    memory_type = memory.MemoryType,
+    content = memory.Content,
+    confidence = memory.Confidence,
+    status = memory.Status,
+    user_verified = memory.UserVerified,
+    is_sensitive = memory.IsSensitive,
+    pending_confirmation = memory.PendingConfirmation,
+    source_kind = memory.SourceKind,
+    superseded_by = memory.SupersededBy,
+    created_at = memory.CreatedAt,
+    updated_at = memory.UpdatedAt,
+};
 
 static async Task WriteSseEventAsync(HttpResponse response, string eventName, object data, CancellationToken cancellationToken)
 {
@@ -272,3 +345,5 @@ public sealed record ChatRequest(
     [property: JsonPropertyName("conversation_id")] string? ConversationId,
     [property: JsonPropertyName("text")] string Text,
     [property: JsonPropertyName("idempotency_key")] string IdempotencyKey);
+
+public sealed record MemoryPatchRequest([property: JsonPropertyName("content")] string? Content);
