@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from eval.memory_runner import MemorySuiteReport, run_memory_suite
+from eval.reflection_runner import ReflectionSuiteReport, run_reflection_suite
 from eval.runner import (
     Metrics,
     build_stage2_batch_requests,
@@ -126,6 +127,25 @@ async def run_memory_eval_suite(args: argparse.Namespace) -> int:
     return 0 if report.candidate_pass_rate == 1.0 else 1
 
 
+def _print_reflection_report(report: ReflectionSuiteReport) -> None:
+    print("\n=== reflection suite: candidate (real reflection agent + validator) ===")
+    print(f"n_cases={report.n_cases}  pass_rate={report.pass_rate:.2f}  false_positive_rate={report.false_positive_rate:.2f}")
+    for result in report.results:
+        mark = "PASS" if result.passed else "FAIL"
+        print(f"  [{mark}] {result.case_id} ({result.category}): {result.detail}")
+    if report.false_positive_rate > 0:
+        print(f"\nFINDING: the validator wrongly rejected a healthy, ordinary case ({report.false_positive_rate:.2f}).")
+
+
+async def run_reflection_eval_suite(args: argparse.Namespace) -> int:
+    import reflection_agent
+
+    provider = OpenAIProvider()
+    report = await run_reflection_suite(provider, reflection_agent.default_model())
+    _print_reflection_report(report)
+    return 0 if report.pass_rate == 1.0 else 1
+
+
 def write_batch(args: argparse.Namespace) -> int:
     cases = load_cases(split=args.split)
     if args.sample:
@@ -147,7 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     eval_parser = subparsers.add_parser("eval", help="run a labeled eval suite through the real pipeline")
-    eval_parser.add_argument("--suite", required=True, choices=("safety", "memory", *STUB_SUITES))
+    eval_parser.add_argument("--suite", required=True, choices=("safety", "memory", "reflection", *STUB_SUITES))
     eval_parser.add_argument("--sample", type=int, default=None, help="run only the first N held-out cases")
     eval_parser.add_argument("--baseline", default=None, help="run_id of a stored run to diff against")
     eval_parser.add_argument("--run-id", default=None, help="override the generated run id")
@@ -175,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.suite == "memory":
             return asyncio.run(run_memory_eval_suite(args))
+        if args.suite == "reflection":
+            return asyncio.run(run_reflection_eval_suite(args))
         return asyncio.run(run_safety_suite(args))
 
     if args.command == "write-batch":

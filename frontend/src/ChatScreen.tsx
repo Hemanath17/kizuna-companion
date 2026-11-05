@@ -1,5 +1,5 @@
 import { useRef, useState, type KeyboardEvent } from 'react'
-import { LogOut, RotateCw } from 'lucide-react'
+import { RotateCw } from 'lucide-react'
 import { useAuth } from './AuthContext'
 import { AuthExpiredError, postChat } from './api'
 import { parseSseStream } from './sse'
@@ -117,14 +117,6 @@ export function ChatScreen() {
 
   return (
     <div className="chat-screen">
-      <header className="chat-header">
-        <h1 className="wordmark">Kizuna</h1>
-        <button type="button" className="icon-button" onClick={() => void signOut()}>
-          <LogOut size={18} aria-hidden="true" />
-          Log out
-        </button>
-      </header>
-
       <div className="message-list">
         {turns.map((turn) => (
           <div key={turn.id} className="turn">

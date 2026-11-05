@@ -36,6 +36,7 @@ async def insert_memory(
     content: str,
     embedding: list[float],
     source_message_id: str | None = None,
+    source_journal_entry_id: str | None = None,
     source_timestamp: datetime | None = None,
     confidence: float | None = None,
     status: str = "active",
@@ -50,16 +51,17 @@ async def insert_memory(
         await conn.execute(
             """
             insert into memory (
-                id, user_id, memory_type, content, source_message_id, source_timestamp,
-                confidence, status, valid_from, valid_until, is_sensitive, pending_confirmation,
-                source_kind, embedding
-            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::vector)
+                id, user_id, memory_type, content, source_message_id, source_journal_entry_id,
+                source_timestamp, confidence, status, valid_from, valid_until, is_sensitive,
+                pending_confirmation, source_kind, embedding
+            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::vector)
             """,
             memory_id,
             user_id,
             memory_type,
             content,
             source_message_id,
+            source_journal_entry_id,
             source_timestamp,
             confidence,
             status,
@@ -96,7 +98,7 @@ async def search_memory(
     args.append(top_k)
     query = f"""
         select id, memory_type, content, confidence, status, user_verified, is_sensitive,
-               pending_confirmation, source_kind, source_message_id, source_timestamp, superseded_by,
+               pending_confirmation, source_kind, source_message_id, source_journal_entry_id, source_timestamp, superseded_by,
                created_at, updated_at, 1 - (embedding <=> $1::vector) as similarity
         from memory
         where {" and ".join(conditions)}
@@ -145,7 +147,7 @@ async def get_memory(pool: asyncpg.Pool, user_id: str, memory_id: str) -> dict |
         row = await conn.fetchrow(
             """
             select id, memory_type, content, confidence, status, user_verified, is_sensitive,
-                   pending_confirmation, source_kind, source_message_id, source_timestamp, superseded_by,
+                   pending_confirmation, source_kind, source_message_id, source_journal_entry_id, source_timestamp, superseded_by,
                    created_at, updated_at
             from memory
             where id = $1
@@ -155,24 +157,77 @@ async def get_memory(pool: asyncpg.Pool, user_id: str, memory_id: str) -> dict |
     return dict(row) if row is not None else None
 
 
-async def list_memories(pool: asyncpg.Pool, user_id: str) -> list[dict]:
+async def list_memories(
+    pool: asyncpg.Pool,
+    user_id: str,
+    *,
+    memory_type: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    # No implicit status filter here: this is a general-purpose query used by
+    # tests and other callers that need the unfiltered history too. The
+    # /memory GET endpoint (memory_routes.py) is what defaults status to
+    # "active" for its "current facts" view.
+    args: list = []
+    conditions: list[str] = []
+    if status is not None:
+        args.append(status)
+        conditions.append(f"status = ${len(args)}")
+    if memory_type is not None:
+        args.append(memory_type)
+        conditions.append(f"memory_type = ${len(args)}")
+    args.append(limit)
+    args.append(offset)
+    where = (" where " + " and ".join(conditions)) if conditions else ""
+    query = f"""
+        select id, memory_type, content, confidence, status, user_verified, is_sensitive,
+               pending_confirmation, source_kind, source_message_id, source_journal_entry_id, source_timestamp, superseded_by,
+               created_at, updated_at
+        from memory
+        {where}
+        order by created_at desc
+        limit ${len(args) - 1} offset ${len(args)}
+    """
+    async with pool.acquire() as conn, user_scoped_transaction(conn, user_id):
+        rows = await conn.fetch(query, *args)
+    return [dict(row) for row in rows]
+
+
+async def get_supersede_history(pool: asyncpg.Pool, user_id: str, memory_id: str) -> list[dict]:
+    """Walks backward through superseded_by to memory_id's prior versions,
+    newest-first -- the memory tab's "corrected from" expansion
+    (ARCHITECTURE.md 5.8). superseded_by is a one-way forward pointer, so
+    finding what led TO a row means walking it in reverse."""
     async with pool.acquire() as conn, user_scoped_transaction(conn, user_id):
         rows = await conn.fetch(
             """
+            with recursive chain as (
+                select * from memory where superseded_by = $1
+                union all
+                select m.* from memory m join chain c on m.superseded_by = c.id
+            )
             select id, memory_type, content, confidence, status, user_verified, is_sensitive,
-                   pending_confirmation, source_kind, source_message_id, source_timestamp, superseded_by,
+                   pending_confirmation, source_kind, source_message_id, source_journal_entry_id, source_timestamp, superseded_by,
                    created_at, updated_at
-            from memory
+            from chain
             order by created_at desc
-            """
+            """,
+            memory_id,
         )
     return [dict(row) for row in rows]
 
 
 async def set_user_verified(pool: asyncpg.Pool, user_id: str, memory_id: str, verified: bool = True) -> None:
+    # Clearing pending_confirmation alongside user_verified matches the
+    # combined correct-or-approve semantics (PLAN.md section 6): either path
+    # is the user confirming this fact, so both actions resolve it.
     async with pool.acquire() as conn, user_scoped_transaction(conn, user_id):
         await conn.execute(
-            "update memory set user_verified = $1, updated_at = now() where id = $2", verified, memory_id
+            "update memory set user_verified = $1, pending_confirmation = false, updated_at = now() where id = $2",
+            verified,
+            memory_id,
         )
 
 

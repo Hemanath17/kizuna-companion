@@ -8,6 +8,7 @@ load_dotenv()  # dev convenience; real deployments set env vars directly
 
 from chat import router as chat_router  # noqa: E402
 from db import create_pool  # noqa: E402
+from memory_routes import router as memory_router  # noqa: E402
 from providers import EchoProvider, OpenAIProvider  # noqa: E402
 
 
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(chat_router)
+app.include_router(memory_router)
 
 
 @app.get("/health")

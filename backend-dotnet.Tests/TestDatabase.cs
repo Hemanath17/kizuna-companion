@@ -115,6 +115,29 @@ public sealed class TestDatabase : IAsyncDisposable
         return await reader.ReadAsync() ? (reader.GetString(0), reader.GetBoolean(1)) : null;
     }
 
+    public async Task<Guid> SeedReflectionAsync(
+        Guid userId, DateTimeOffset periodStart, DateTimeOffset periodEnd, string status = "pending",
+        string? body = null, string? rejectionReason = null)
+    {
+        var reflectionId = Guid.NewGuid();
+        await using var connection = new NpgsqlConnection(AdoConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            insert into reflections (id, user_id, period_start, period_end, status, body, rejection_reason)
+            values (@id, @userId, @periodStart, @periodEnd, @status, @body, @rejectionReason)
+            """;
+        command.Parameters.AddWithValue("id", reflectionId);
+        command.Parameters.AddWithValue("userId", userId);
+        command.Parameters.AddWithValue("periodStart", periodStart);
+        command.Parameters.AddWithValue("periodEnd", periodEnd);
+        command.Parameters.AddWithValue("status", status);
+        command.Parameters.AddWithValue("body", (object?)body ?? DBNull.Value);
+        command.Parameters.AddWithValue("rejectionReason", (object?)rejectionReason ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync();
+        return reflectionId;
+    }
+
     public async Task<int> CountTombstonesAsync(Guid userId)
     {
         await using var connection = new NpgsqlConnection(AdoConnectionString);
@@ -237,6 +260,8 @@ public sealed class TestDatabase : IAsyncDisposable
             Path.Combine(directory.FullName, "db", "0004_memory_source_kind.sql"),
             Path.Combine(directory.FullName, "db", "0005_worker_lease.sql"),
             Path.Combine(directory.FullName, "db", "0006_worker_memory_access.sql"),
+            Path.Combine(directory.FullName, "db", "0007_journal.sql"),
+            Path.Combine(directory.FullName, "db", "0008_reflections.sql"),
         ];
     }
 

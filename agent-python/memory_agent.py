@@ -128,13 +128,19 @@ async def propose_memory_ops(
     candidate_text: str,
     *,
     model: Model | None = None,
+    tool_calls_limit: int = TOOL_CALL_BUDGET,
 ) -> list[ProposedOperation]:
+    # tool_calls_limit is overridable (not just TOOL_CALL_BUDGET) because the
+    # journal extraction path (worker.py) runs this per paragraph-sized
+    # chunk of a long entry, not per short conversational turn, and needs a
+    # tighter budget per call so a long entry can't fan out into dozens of
+    # model round-trips.
     deps = MemoryAgentDeps(pool=pool, user_id=user_id, embed_provider=embed_provider)
     result = await memory_agent.run(
         candidate_text,
         deps=deps,
         model=model or default_model(),
-        usage_limits=UsageLimits(tool_calls_limit=TOOL_CALL_BUDGET),
+        usage_limits=UsageLimits(tool_calls_limit=tool_calls_limit),
         model_settings=ModelSettings(max_tokens=MAX_OUTPUT_TOKENS),
     )
     return result.output

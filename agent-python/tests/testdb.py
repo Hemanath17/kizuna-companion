@@ -121,6 +121,43 @@ class TestDatabase:
         finally:
             await conn.close()
 
+    async def seed_journal_entry(self, user_id: uuid.UUID, body: str, mood: str | None = None) -> uuid.UUID:
+        conn = await asyncpg.connect(self.superuser_dsn)
+        try:
+            return await conn.fetchval(
+                """
+                insert into journal_entries (id, user_id, body, mood, idempotency_key)
+                values (gen_random_uuid(), $1, $2, $3, $4)
+                returning id
+                """,
+                user_id, body, mood, f"test-{uuid.uuid4()}",
+            )
+        finally:
+            await conn.close()
+
+    async def seed_reflection(
+        self, user_id: uuid.UUID, period_start, period_end,
+    ) -> uuid.UUID:
+        conn = await asyncpg.connect(self.superuser_dsn)
+        try:
+            return await conn.fetchval(
+                """
+                insert into reflections (id, user_id, period_start, period_end, status)
+                values (gen_random_uuid(), $1, $2, $3, 'pending')
+                returning id
+                """,
+                user_id, period_start, period_end,
+            )
+        finally:
+            await conn.close()
+
+    async def fetch_reflection(self, reflection_id: uuid.UUID):
+        conn = await asyncpg.connect(self.superuser_dsn)
+        try:
+            return await conn.fetchrow("select * from reflections where id = $1", reflection_id)
+        finally:
+            await conn.close()
+
     async def superuser_fetch(self, query: str, *args):
         conn = await asyncpg.connect(self.superuser_dsn)
         try:
@@ -202,6 +239,8 @@ async def create_test_database() -> TestDatabase:
             "0004_memory_source_kind.sql",
             "0005_worker_lease.sql",
             "0006_worker_memory_access.sql",
+            "0007_journal.sql",
+            "0008_reflections.sql",
         ):
             migration_sql = (_repo_root() / "db" / migration_file).read_text()
             await conn.execute(migration_sql)

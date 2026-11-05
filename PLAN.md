@@ -194,6 +194,26 @@ Evaluation-first requirements:
 Chat-to-journal: a "save this" control turns a conversation moment into a journal entry (user-initiated, so retention is a choice).
 Mood over time: light and reflective, a gentle trend from stored emotion labels, never a diagnosis.
 
+### Phase 4 decisions (frozen 2026-11-03)
+
+1. Memory lifecycle ownership. Python owns the complete memory lifecycle (create, correct, forget, embed, supersede, tombstone). The .NET memory mutation endpoints become thin authenticated proxies that forward to Python. Rationale: .NET's PATCH/DELETE endpoints were duplicating supersede/tombstone/provenance logic in a second language, and .NET has no embedding model access, so a correction made through it left the embedding stale — retrieval kept matching the old wording. Consolidating removes the class of bug, not the instance. (See the conflict note below against frozen contract #1.)
+
+2. User corrections follow the same supersede lifecycle as agent corrections: supersede the old row, insert a new row with a fresh embedding, user_verified = true, source_kind = 'stated'. No in-place edit. History is preserved and auditable.
+
+3. Reflections are on-demand only. No cron, no scheduler, no notifications. The user requests a reflection, .NET inserts a pending row and enqueues an outbox job, and the existing Phase 3 worker processes it. Rationale: reuses proven durable infrastructure, requires no timezone column or inactive-user policy, is deterministic for demos, and is the most defensible choice against wellbeing rules C7-C10 (no manufactured re-engagement).
+
+4. Mood is self-reported only, optional, attached to journal entries. There is no mood or sentiment inference anywhere in the product. Rationale: an unvalidated emotional-state inference displayed back to a user is a harm, and we have no way to validate it. Self-reported labels are ground truth, and would serve as the evaluation set if inference is ever added later.
+
+5. No mood trend chart in Phase 4. Mood is shown per entry only. A trend view is deliberately deferred until there is enough real data to render honestly (discrete points, never a smoothed line implying continuity).
+
+6. Reflections can be deleted but not edited. Users may attach their own note beneath a reflection. Rationale: provenance integrity. Allowing users to edit AI-authored text that then feeds memory or future reflections would corrupt the source_kind ('stated' vs 'inferred') model built in Phase 3.
+
+7. Journal entries flow through the memory extraction pipeline, which makes memory channel-agnostic rather than chat-specific. Extraction runs in the cold path via the outbox, with explicit chunking and a per-entry proposal budget, because the memory agent was calibrated on short conversational turns.
+
+8. Reflection generation passes through a deterministic validation layer before commit: the same constrained-autonomy shape as memory. The agent proposes prose, deterministic non-LLM code decides whether it may be shown.
+
+**Conflict check against frozen contract #1 (section 16).** Contract #1's text is scoped to the chat turn: it decides which tier inserts the user-message row versus the assistant-message row, because the UNIQUE(user_id, idempotency_key) dedup constraint can only be enforced by whichever tier performs that insert. It does not state a general rule that ".NET owns every write of user-originated content" — Step 4.2's journal entries (genuinely raw, user-authored text with no derived lifecycle) stay owned by .NET for that reason, consistent with the contract's actual scope. Memory rows are not raw user content: they are the policy layer's derived interpretation of a turn or journal entry, carrying a lifecycle (supersede chains, tombstones, embeddings) contract #1 never addresses. Decision 1 does not violate contract #1. It does obsolete one piece of guidance in section 16's "Known gaps to close in Phase 5" list: the plan to give .NET a defense-in-depth RLS identity for memory-table access is now moot, since .NET will no longer touch the memory tables directly at all (the gap is closed by removing the access, not by hardening it). That note should be read as superseded, not acted on.
+
 ---
 
 ## 10. Avatar (Live2D)

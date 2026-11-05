@@ -158,7 +158,9 @@ Budget (p50, must stream+overlap): endpointing 200-300 / STT 50-150 / LLM first 
 Worker claims outbox rows with FOR UPDATE SKIP LOCKED (no two workers take the same job)
  per turn_id (idempotent on turn_id; safe to retry):
    tag_emotion (analytics/journal; NOT the avatar driver)
-   memory pipeline (5.5)
+   extract_memory (memory pipeline, 5.5, chat-sourced)
+   journal_memory_extraction (memory pipeline, 5.5, journal-sourced; chunked, 5.10)
+   reflection_generate (reflection agent + validator, 5.11)
  mark outbox row done
  lease expiry reclaims jobs from crashed workers; bounded retries -> dead-letter; reconciliation sweeps abandoned turns
 ```
@@ -205,6 +207,55 @@ View facts with provenance and stated/inferred labels. Correct -> sets user_veri
 /admin/eval      latest suite results vs baseline
 ```
 No endpoint returns a real user's conversation or memory content. Demos use seeded synthetic accounts.
+
+### 5.10 Journal entry write + memory extraction
+
+```
+Browser --POST /journal {body, mood?, idempotency_key}--> .NET
+.NET: verify JWT; INSERT journal_entries row + INSERT outbox row ('journal_memory_extraction')
+      in ONE transaction (same discipline as 5.1's finalize-plus-outbox)
+.NET --> Browser (201, entry)
+
+Worker claims the 'journal_memory_extraction' job:
+  chunk body on paragraph boundaries into ~400-500 token windows
+  per chunk: run memory_agent with a reduced tool_calls_limit
+  commit proposals through the existing policy.py (no second committer)
+  enforce a per-entry cap on total committed proposals (default 10); log explicitly if hit
+  memories get source_kind='stated' (the user wrote the words) and source_journal_entry_id set
+```
+Editing a journal entry does NOT re-run extraction (documented limitation, db/README.md): re-extraction would need supersede semantics across the whole entry, out of scope for Phase 4.
+
+### 5.11 On-demand reflection, via the outbox
+
+```
+Browser --POST /reflections {period: 'day'|'week'}--> .NET
+.NET: compute the window server-side; INSERT reflections row (status='pending'),
+      ON CONFLICT (user_id, period_start, period_end) DO NOTHING -> idempotent repeat request
+      + INSERT outbox row ('reflection_generate') in ONE transaction
+.NET --> Browser (the pending or existing row)
+
+Worker claims 'reflection_generate':
+  reflection_agent (Pydantic AI, read-only tools over messages/memories in the window) proposes
+    {body, memory_ids_used}
+  reflection_validator (deterministic, non-LLM) checks dependency/re-engagement language (C7-C10),
+    clinical/diagnostic language, length bounds, and that every claimed memory_id is real and the
+    user's own
+  pass -> status='ready'; fail -> one retry with a stricter instruction; fail again ->
+    status='rejected' with rejection_reason, body never shown
+```
+No scheduler, no cron, no notification. Explicitly matches Phase 4 decision 3.
+
+### 5.12 Memory tab mutations, through the .NET proxy
+
+```
+Browser --GET/PATCH/DELETE /memory(/{id})--> .NET
+.NET: verify Supabase JWT; mint internal token; forward to Python unchanged
+Python: GET/PATCH/DELETE /memory(/{id}), scoped to the token's sub claim
+  PATCH: supersede old row + insert new row with fresh embedding (same code path memory_agent's
+         own UPDATE uses, via memory_store.py + policy.py) + user_verified=true, source_kind='stated'
+  DELETE: tombstone (content_hash + embedding), mark deleted (matches 5.8)
+.NET: propagate Python's status and body verbatim (never masked as a generic 500)
+```
 
 ---
 

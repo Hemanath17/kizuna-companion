@@ -3,13 +3,17 @@ is the spec these cases were written from -- not the implementation -- per
 Phase 3 Step 3.4's instruction to write eval cases independently of the code
 under test.
 
-Six categories, one mechanism each:
+Seven categories, one mechanism each:
   extraction_correctness        -- a stated fact gets committed as memory.
   duplicate_handling            -- restating the same fact doesn't duplicate.
   contradiction_vs_changed_feeling -- a changed feeling appends, never overwrites.
   deletion_integrity            -- a forgotten fact never resurfaces, reworded or not.
   retrieval_relevance           -- the right memory surfaces for a related query.
   sensitive_staging             -- a sensitive fact is held, not auto-active.
+  journal_extraction            -- Phase 4 Step 4.2: a long journal entry's durable
+                                    facts are extracted and its noise rejected,
+                                    through the same paragraph-chunked path
+                                    worker.handle_journal_memory_extraction uses.
 
 Each case runs through the REAL pipeline (memory_agent + policy, or
 context_builder for the two pure-retrieval categories) against a disposable
@@ -57,6 +61,7 @@ BASELINE_APPLICABLE_CATEGORIES = {
     "duplicate_handling",
     "contradiction_vs_changed_feeling",
     "sensitive_staging",
+    "journal_extraction",
 }
 
 
@@ -66,6 +71,7 @@ class MemoryEvalCase:
     category: str
     setup: list[dict] = field(default_factory=list)  # [{"content": ..., "memory_type": ...}]
     turn_text: str | None = None
+    journal_body: str | None = None
     retrieval_query: str | None = None
     expect: dict = field(default_factory=dict)
 
@@ -181,6 +187,30 @@ async def _eval_sensitive_staging(pool, user_id, embed_provider, agent_model, ca
     return passed, f"staged={len(staged)} excluded_from_retrieval={excluded_from_retrieval}"
 
 
+async def _eval_journal_extraction(pool, user_id, embed_provider, agent_model, case: MemoryEvalCase):
+    from worker import JOURNAL_CHUNK_TOOL_CALLS_LIMIT, JOURNAL_PROPOSAL_CAP, _chunk_journal_body, is_fact_bearing
+
+    chunks = [c for c in _chunk_journal_body(case.journal_body) if is_fact_bearing(c)]
+    total_committed = 0
+    for chunk in chunks:
+        if total_committed >= JOURNAL_PROPOSAL_CAP:
+            break
+        proposals = await propose_memory_ops(
+            pool, user_id, embed_provider, chunk, model=agent_model, tool_calls_limit=JOURNAL_CHUNK_TOOL_CALLS_LIMIT
+        )
+        proposals = [p.model_copy(update={"source_kind": "stated"}) for p in proposals]
+        decisions = await commit_proposed_operations(
+            pool, user_id, embed_provider, proposals, turn_timestamp=datetime.now(timezone.utc)
+        )
+        total_committed += sum(1 for d in decisions if d.accepted)
+
+    memories = await _active_memories(pool, user_id)
+    expected_count = case.expect["fact_count"]
+    cap_respected = total_committed <= JOURNAL_PROPOSAL_CAP
+    passed = len(memories) == expected_count and cap_respected
+    return passed, f"chunks={len(chunks)} committed={total_committed} active={len(memories)} cap_respected={cap_respected}"
+
+
 _CANDIDATE_HANDLERS = {
     "extraction_correctness": _eval_extraction_correctness,
     "duplicate_handling": _eval_duplicate_handling,
@@ -188,6 +218,7 @@ _CANDIDATE_HANDLERS = {
     "deletion_integrity": _eval_deletion_integrity,
     "retrieval_relevance": _eval_retrieval_relevance,
     "sensitive_staging": _eval_sensitive_staging,
+    "journal_extraction": _eval_journal_extraction,
 }
 
 
@@ -252,6 +283,26 @@ async def _run_baseline(pool, user_id, embed_provider, case: MemoryEvalCase) -> 
         # failure here: PLAN.md section 6 requires sensitive facts to be
         # held for confirmation, which the baseline cannot do.
         return False, f"decision={decision} (baseline has no sensitivity judgment)"
+
+    if case.category == "journal_extraction":
+        from worker import _chunk_journal_body, is_fact_bearing
+
+        # No chunk-level fact/noise decomposition at all: the baseline's
+        # only move per chunk is dedup-or-insert-whole, so a chunk holding
+        # several facts plus filler becomes one undifferentiated memory row,
+        # not three structured facts with the noise dropped.
+        chunks = [c for c in _chunk_journal_body(case.journal_body) if is_fact_bearing(c)]
+        for chunk in chunks:
+            decision = await _baseline_decide(pool, user_id, embed_provider, chunk)
+            if decision == "new":
+                await memory_store.insert_memory(
+                    pool, user_id, memory_type="episodic", content=chunk,
+                    embedding=await embed_text(embed_provider, chunk),
+                )
+        memories = await _active_memories(pool, user_id)
+        expected_count = case.expect["fact_count"]
+        passed = len(memories) == expected_count
+        return passed, f"active={len(memories)} expected={expected_count} (baseline has no fact-vs-noise decomposition)"
 
     raise ValueError(f"no baseline defined for category {case.category!r}")
 

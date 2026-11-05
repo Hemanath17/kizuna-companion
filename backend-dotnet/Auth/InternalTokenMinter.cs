@@ -37,4 +37,32 @@ public sealed class InternalTokenMinter(InternalTokenOptions options)
 
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
+
+    // Phase 4 Step 4.1: memory mutations aren't tied to a turn, so this
+    // token carries no turn_id -- scope alone (memory:manage) is what
+    // Python's require_memory_manage checks.
+    public string MintMemoryManageToken(Guid userId)
+    {
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(options.SigningKey));
+        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        var now = DateTimeOffset.UtcNow;
+
+        var claims = new[]
+        {
+            new Claim("sub", userId.ToString()),
+            new Claim("scope", "memory:manage"),
+            new Claim("jti", Guid.NewGuid().ToString()),
+            new Claim(JwtRegisteredClaimNames.Iat, now.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64),
+        };
+
+        var token = new JwtSecurityToken(
+            issuer: options.Issuer,
+            audience: options.Audience,
+            claims: claims,
+            notBefore: now.UtcDateTime,
+            expires: now.Add(Lifetime).UtcDateTime,
+            signingCredentials: credentials);
+
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
 }

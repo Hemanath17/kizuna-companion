@@ -5,12 +5,17 @@ contract 8). Runnable as its own process, separate from the FastAPI app:
 
 Per outbox row it runs exactly one job:
   - tag_emotion: classify the turn's user message and store the label/score.
-  - extract_memory: STUBBED. Only the cheap pre-filter runs for real; the
-    memory agent that would actually extract facts lands in Phase 3 Step 3.3.
+  - extract_memory: memory_agent + policy.py over one chat turn.
+  - journal_memory_extraction: the same pipeline, chunked, over a journal
+    entry (Phase 4 Step 4.2).
+  - reflection_generate: reflection_agent + reflection_validator.py -- a
+    generated reflection that fails validation twice is rejected and never
+    shown (Phase 4 Step 4.3).
 """
 
 import asyncio
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import timedelta
@@ -31,6 +36,15 @@ RECONCILE_INTERVAL_SECONDS = 30.0
 
 EMOTION_MAX_TOKENS = 50
 EMOTION_NODE = "tag_emotion"
+
+# Journal entries are long-form, unlike short conversational turns, so
+# extraction (Phase 4 Step 4.2) chunks on paragraph boundaries and runs the
+# memory agent per chunk with a reduced tool-call budget, bounded by a
+# per-entry cap on total committed proposals.
+_CHARS_PER_TOKEN = 4  # same no-tokenizer heuristic as context_builder.py
+JOURNAL_CHUNK_TARGET_TOKENS = 450
+JOURNAL_CHUNK_TOOL_CALLS_LIMIT = 3
+JOURNAL_PROPOSAL_CAP = 10
 
 
 class EmotionClassification(BaseModel):
@@ -75,6 +89,32 @@ def is_fact_bearing(text: str) -> bool:
     if _EMOTION_ONLY_PATTERN.match(normalized):
         return False
     return len(normalized.split()) > 2
+
+
+def _chunk_journal_body(body: str, *, target_tokens: int = JOURNAL_CHUNK_TARGET_TOKENS) -> list[str]:
+    """Splits on paragraph (blank-line) boundaries into windows of roughly
+    target_tokens, using the same chars-per-token heuristic as
+    context_builder.py rather than a tokenizer dependency. A single
+    paragraph longer than the target is kept whole, not split mid-paragraph
+    -- the boundary rule the step asked for takes priority over a hard size
+    cap."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+    if not paragraphs:
+        return []
+    target_chars = target_tokens * _CHARS_PER_TOKEN
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for paragraph in paragraphs:
+        if current and current_len + len(paragraph) > target_chars:
+            chunks.append("\n\n".join(current))
+            current = []
+            current_len = 0
+        current.append(paragraph)
+        current_len += len(paragraph)
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
 
 
 async def claim_job(pool: asyncpg.Pool, *, lease_duration: timedelta = LEASE_DURATION) -> OutboxJob | None:
@@ -166,7 +206,7 @@ async def handle_tag_emotion(pool: asyncpg.Pool, provider: ProviderInterface, jo
 async def handle_extract_memory(pool: asyncpg.Pool, provider: ProviderInterface, job: OutboxJob) -> None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "select content, created_at from messages where turn_id = $1 and role = 'user'", job.turn_id
+            "select id, content, created_at from messages where turn_id = $1 and role = 'user'", job.turn_id
         )
     if row is None or not is_fact_bearing(row["content"]):
         logger.info("extract_memory_skipped turn_id=%s reason=pre_filter", job.turn_id)
@@ -180,7 +220,7 @@ async def handle_extract_memory(pool: asyncpg.Pool, provider: ProviderInterface,
 
     proposals = await propose_memory_ops(pool, job.user_id, provider, row["content"])
     decisions = await commit_proposed_operations(
-        pool, job.user_id, provider, proposals, turn_timestamp=row["created_at"]
+        pool, job.user_id, provider, proposals, turn_timestamp=row["created_at"], source_message_id=str(row["id"])
     )
     logger.info(
         "extract_memory_committed turn_id=%s proposals=%d accepted=%d",
@@ -190,9 +230,143 @@ async def handle_extract_memory(pool: asyncpg.Pool, provider: ProviderInterface,
     )
 
 
+async def handle_journal_memory_extraction(pool: asyncpg.Pool, provider: ProviderInterface, job: OutboxJob) -> None:
+    # outbox.turn_id is reused as a generic "subject id" here -- it holds
+    # the journal entry's id (see JournalRepository.CreateAsync in .NET),
+    # not a chat turn_id. The column carries no FK, so this is a safe reuse.
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("select body, created_at from journal_entries where id = $1", job.turn_id)
+    if row is None:
+        logger.info("journal_memory_extraction_skipped entry_id=%s reason=not_found", job.turn_id)
+        return
+
+    from memory_agent import propose_memory_ops
+    from policy import commit_proposed_operations
+
+    chunks = [chunk for chunk in _chunk_journal_body(row["body"]) if is_fact_bearing(chunk)]
+    total_committed = 0
+    for chunk in chunks:
+        if total_committed >= JOURNAL_PROPOSAL_CAP:
+            logger.info(
+                "journal_memory_extraction_cap_hit entry_id=%s cap=%d committed=%d",
+                job.turn_id, JOURNAL_PROPOSAL_CAP, total_committed,
+            )
+            break
+
+        proposals = await propose_memory_ops(
+            pool, job.user_id, provider, chunk, tool_calls_limit=JOURNAL_CHUNK_TOOL_CALLS_LIMIT
+        )
+        # The user wrote every word of a journal entry themselves: source_kind
+        # is forced to 'stated' regardless of what the agent proposed
+        # (PLAN.md Phase 4 decision 7) -- the same deterministic-override
+        # pattern policy.py already uses for pending_confirmation.
+        proposals = [p.model_copy(update={"source_kind": "stated"}) for p in proposals]
+
+        decisions = await commit_proposed_operations(
+            pool, job.user_id, provider, proposals,
+            turn_timestamp=row["created_at"], source_journal_entry_id=job.turn_id,
+        )
+        total_committed += sum(1 for d in decisions if d.accepted)
+
+    logger.info(
+        "journal_memory_extraction_committed entry_id=%s chunks=%d committed=%d",
+        job.turn_id, len(chunks), total_committed,
+    )
+
+
+async def handle_reflection_generate(pool: asyncpg.Pool, provider: ProviderInterface, job: OutboxJob) -> None:
+    # outbox.turn_id is reused as a generic "subject id" here too -- it
+    # holds the reflection's id (see ReflectionRepository.CreateOrGetAsync
+    # in .NET).
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "select period_start, period_end from reflections where id = $1 and user_id = $2",
+            job.turn_id, job.user_id,
+        )
+    if row is None:
+        logger.info("reflection_generate_skipped reflection_id=%s reason=not_found", job.turn_id)
+        return
+
+    import memory_store
+    from reflection_agent import REFLECTION_PROMPT_VERSION, propose_reflection
+    from reflection_validator import REFLECTION_VALIDATOR_VERSION, check_grounding_soft, validate_reflection
+
+    period_start, period_end = row["period_start"], row["period_end"]
+
+    memories_in_window = [
+        m for m in await memory_store.list_memories(pool, job.user_id, status="active")
+        if period_start <= m["created_at"] < period_end
+    ]
+    known_memory_ids = {str(m["id"]) for m in memories_in_window}
+    source_texts = [m["content"] for m in memories_in_window]
+    async with pool.acquire() as conn:
+        message_rows = await conn.fetch(
+            """
+            select content from messages
+            where user_id = $1 and role = 'user' and created_at >= $2 and created_at < $3
+            """,
+            job.user_id, period_start, period_end,
+        )
+    source_texts += [r["content"] for r in message_rows]
+
+    model = os.environ.get("UTILITY_MODEL", "gpt-4o-mini")
+    rejection_reason: str | None = None
+    for attempt_num in range(2):  # the one retry ARCHITECTURE.md 5.11/PLAN.md Step 4.3 asks for
+        extra_instruction = None
+        if attempt_num == 1:
+            extra_instruction = (
+                f"Your previous attempt was rejected ({rejection_reason}). Revise: stay strictly "
+                "grounded in what the tools returned, avoid any dependency, re-engagement, or "
+                "clinical/diagnostic language, and keep it concise."
+            )
+        output = await propose_reflection(
+            pool, job.user_id, period_start, period_end, extra_instruction=extra_instruction
+        )
+        result = validate_reflection(output.body, output.memory_ids_used, known_memory_ids)
+        if result.ok:
+            suspicious = check_grounding_soft(output.body, source_texts)
+            if suspicious:
+                logger.warning(
+                    "reflection_grounding_soft_check reflection_id=%s suspicious_terms=%s",
+                    job.turn_id, suspicious,
+                )
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    update reflections
+                    set body = $1, status = 'ready', prompt_version = $2, validator_version = $3,
+                        model = $4, generated_at = now()
+                    where id = $5
+                    """,
+                    output.body, REFLECTION_PROMPT_VERSION, REFLECTION_VALIDATOR_VERSION, model, job.turn_id,
+                )
+            logger.info("reflection_generate_ready reflection_id=%s attempt=%d", job.turn_id, attempt_num + 1)
+            return
+        rejection_reason = result.reason
+        logger.info(
+            "reflection_generate_validation_failed reflection_id=%s attempt=%d reason=%s",
+            job.turn_id, attempt_num + 1, rejection_reason,
+        )
+
+    # Both attempts failed validation: never fall back to displaying
+    # unvalidated prose (PLAN.md Phase 4 decision 8) -- body stays null.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            update reflections
+            set status = 'rejected', rejection_reason = $1, prompt_version = $2, validator_version = $3
+            where id = $4
+            """,
+            rejection_reason, REFLECTION_PROMPT_VERSION, REFLECTION_VALIDATOR_VERSION, job.turn_id,
+        )
+    logger.info("reflection_generate_rejected reflection_id=%s reason=%s", job.turn_id, rejection_reason)
+
+
 JOB_HANDLERS = {
     "tag_emotion": handle_tag_emotion,
     "extract_memory": handle_extract_memory,
+    "journal_memory_extraction": handle_journal_memory_extraction,
+    "reflection_generate": handle_reflection_generate,
 }
 
 
