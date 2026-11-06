@@ -48,6 +48,27 @@ public sealed class ReflectionEndpointTests
         Assert.Equal(1, await fixture.FetchOutboxForSubjectAsync(Guid.Parse(reflectionId!)));
     }
 
+    // Step 4.5 live-verification finding: see JournalEndpointTests'
+    // Post_Succeeds_ForFreshlySignedUpUser_WithNoPriorProfileRow for context.
+    [Fact]
+    public async Task Post_Succeeds_ForFreshlySignedUpUser_WithNoPriorProfileRow()
+    {
+        await using var fixture = await ReflectionTestFixture.CreateAsync();
+        var userId = Guid.NewGuid();
+        await fixture.Database.SeedAuthUserAsync(userId); // no SeedProfileAsync
+        var client = fixture.AuthorizedClient(userId);
+
+        var response = await client.PostAsJsonAsync("/reflections", new { period = "week" });
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+
+        await using var connection = new NpgsqlConnection(fixture.Database.AdoConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "select count(*) from profiles where id = @id";
+        command.Parameters.AddWithValue("id", userId);
+        Assert.Equal(1L, await command.ExecuteScalarAsync());
+    }
+
     [Fact]
     public async Task Post_RejectsAnUnknownPeriod()
     {

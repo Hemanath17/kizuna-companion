@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using backend_dotnet.Auth;
 using backend_dotnet.Data;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
 
@@ -81,18 +82,42 @@ app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
 
+// Step 4.5 live-verification finding: EnsureProfileAsync used to run only
+// inside the /me handler, which the frontend never calls -- a freshly signed
+// up user's first write anywhere else (e.g. /chat, /journal, /reflections)
+// hit a profiles FK violation and 500'd. Running it here, after
+// authentication/authorization and before any endpoint handler, guarantees
+// the row exists on the FIRST authenticated request no matter which endpoint
+// it hits, so no future endpoint can reintroduce this bug by forgetting to
+// call /me first. EnsureProfileAsync's INSERT ... ON CONFLICT DO NOTHING is
+// cheap and idempotent, so paying for it on every request is the right trade
+// for "no endpoint can forget this" over micro-optimizing the common case.
+app.Use(async (context, next) =>
+{
+    if (context.User.Identity?.IsAuthenticated == true)
+    {
+        var sub = context.User.FindFirst("sub")?.Value;
+        if (sub is not null && Guid.TryParse(sub, out var userId))
+        {
+            var email = context.User.FindFirst("email")?.Value;
+            var profiles = context.RequestServices.GetRequiredService<IProfileRepository>();
+            await profiles.EnsureProfileAsync(userId, email, context.RequestAborted);
+        }
+    }
+    await next(context);
+});
+
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
-app.MapGet("/me", async (ClaimsPrincipal user, IProfileRepository profiles, CancellationToken cancellationToken) =>
+app.MapGet("/me", (ClaimsPrincipal user) =>
 {
     var sub = user.FindFirst("sub")?.Value;
     var email = user.FindFirst("email")?.Value;
-    if (sub is null || !Guid.TryParse(sub, out var userId))
+    if (sub is null || !Guid.TryParse(sub, out _))
     {
         return Results.Unauthorized();
     }
 
-    await profiles.EnsureProfileAsync(userId, email, cancellationToken);
     return Results.Ok(new { user_id = sub, email });
 }).RequireAuthorization();
 

@@ -12,6 +12,7 @@ import reflection_agent
 from fake_openai import FakeAsyncOpenAIClient
 from providers import EchoProvider, OpenAIProvider
 from worker import (
+    JOURNAL_CHUNK_TOOL_CALLS_LIMIT,
     JOURNAL_PROPOSAL_CAP,
     MAX_ATTEMPTS,
     EmotionClassification,
@@ -327,6 +328,130 @@ async def test_a_2000_word_journal_entry_completes_extraction_without_exceeding_
     assert row["status"] == "done"
     memories = await memory_store.list_memories(pool, str(user_id))
     assert len(memories) <= JOURNAL_PROPOSAL_CAP
+
+
+@pytest.mark.asyncio
+async def test_journal_memory_extraction_completes_when_a_chunk_needs_more_than_the_old_tight_limit(
+    worker_pool, pool, test_database, monkeypatch
+):
+    """Step 4.5/4.6/4.7: against the real model, a chunk with several distinct
+    facts routinely needs more than 3 tool calls (searches/get-recent) before
+    it can finalize -- the old JOURNAL_CHUNK_TOOL_CALLS_LIMIT=3 made this
+    dead-letter deterministically every time. This oracle scripts exactly
+    that shape (4 intermediate tool calls, then the final answer) -- more
+    than the old limit, within the new one -- and proves the job now
+    completes end to end instead of raising UsageLimitExceeded."""
+    user_id = uuid.uuid4()
+    await test_database.seed_auth_user(user_id)
+    await test_database.seed_profile_and_conversation(user_id, uuid.uuid4())
+    body = (
+        "Work has been a lot lately, but it paid off: I got a promotion to senior "
+        "engineer at Acme this week, which feels great after all those late nights.\n\n"
+        "On a completely different note, we adopted a rescue dog named Biscuit over "
+        "the weekend. She's nervous around loud noises but already loves the backyard.\n\n"
+        "I've also started training for a half marathon in the spring. My knees are a "
+        "little sore today, but I'm sticking with the plan."
+    )
+    entry_id = await test_database.seed_journal_entry(user_id, body)
+    job_id = await test_database.seed_outbox_job(entry_id, user_id, "journal_memory_extraction")
+
+    assert JOURNAL_CHUNK_TOOL_CALLS_LIMIT > 3, "test assumes the limit was raised above the old value of 3"
+    calls = {"n": 0}
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        calls["n"] += 1
+        if calls["n"] <= 4:  # 4 intermediate calls: exceeds the old limit (3), within the new one
+            return ModelResponse(parts=[ToolCallPart(tool_name="search_memory_tool", args={"query_text": "x"})])
+        out_tool = info.output_tools[0]
+        ops = [
+            {
+                "op": "NEW", "content": "promoted to senior engineer at Acme", "memory_type": "profile",
+                "confidence": 0.9, "is_sensitive": False, "source_kind": "stated", "reason": "oracle",
+            },
+            {
+                "op": "NEW", "content": "adopted a dog named Biscuit", "memory_type": "episodic",
+                "confidence": 0.9, "is_sensitive": False, "source_kind": "stated", "reason": "oracle",
+            },
+            {
+                "op": "NEW", "content": "training for a half marathon", "memory_type": "episodic",
+                "confidence": 0.8, "is_sensitive": False, "source_kind": "stated", "reason": "oracle",
+            },
+        ]
+        return ModelResponse(parts=[ToolCallPart(tool_name=out_tool.name, args={"response": ops})])
+
+    monkeypatch.setattr(memory_agent, "default_model", lambda: FunctionModel(fn))
+
+    worked = await process_one(worker_pool, EchoProvider())
+
+    assert worked is True
+    row = await test_database.fetch_outbox_row(job_id)
+    assert row["status"] == "done"  # not dead_letter
+    memories = await memory_store.list_memories(pool, str(user_id))
+    assert len(memories) == 3
+
+
+@pytest.mark.asyncio
+async def test_journal_memory_extraction_degrades_gracefully_when_a_chunk_never_converges(
+    worker_pool, pool, test_database, monkeypatch
+):
+    """The real model's tool-calling isn't reliably convergent (Step 4.7
+    measurement): no fixed limit guarantees a chunk finalizes. This oracle
+    makes one chunk converge normally and scripts a second, deliberately
+    pathological chunk that always calls a tool and never produces the final
+    answer -- proving the job still completes (partial result), rather than
+    losing the whole entry's work and dead-lettering."""
+    user_id = uuid.uuid4()
+    await test_database.seed_auth_user(user_id)
+    await test_database.seed_profile_and_conversation(user_id, uuid.uuid4())
+
+    # First paragraph alone is padded past the chunk token budget (same
+    # technique as the proposal-cap test above), so it's kept whole as its
+    # own chunk and the second paragraph is forced into a separate one --
+    # guarantees two distinct chunks, not one merged chunk.
+    convergent_paragraph = (
+        "Padding padding padding padding padding padding padding padding padding padding. " * 25
+    ) + " I got a promotion to senior engineer at Acme this week."
+    pathological_paragraph = "PATHOLOGICAL_CHUNK_MARKER lots of distinct facts happened today, six of them at least."
+    entry_id = await test_database.seed_journal_entry(
+        user_id, convergent_paragraph + "\n\n" + pathological_paragraph
+    )
+    job_id = await test_database.seed_outbox_job(entry_id, user_id, "journal_memory_extraction")
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        # Each chunk gets its own fresh agent run, so there is exactly one
+        # real UserPromptPart anywhere in this run's history -- the chunk
+        # text itself, always in the FIRST ModelRequest. Only looking at the
+        # latest ModelRequest breaks on round 2+ of a chunk's own
+        # conversation, once that latest request is a tool-return follow-up
+        # instead of the original prompt.
+        prompt = ""
+        for message in messages:
+            if isinstance(message, ModelRequest):
+                for part in message.parts:
+                    if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                        prompt = part.content
+                        break
+                if prompt:
+                    break
+        if "PATHOLOGICAL_CHUNK_MARKER" in prompt:
+            return ModelResponse(parts=[ToolCallPart(tool_name="search_memory_tool", args={"query_text": "x"})])
+        out_tool = info.output_tools[0]
+        op = {
+            "op": "NEW", "content": "promoted to senior engineer at Acme", "memory_type": "profile",
+            "confidence": 0.9, "is_sensitive": False, "source_kind": "stated", "reason": "oracle",
+        }
+        return ModelResponse(parts=[ToolCallPart(tool_name=out_tool.name, args={"response": [op]})])
+
+    monkeypatch.setattr(memory_agent, "default_model", lambda: FunctionModel(fn))
+
+    worked = await process_one(worker_pool, EchoProvider())
+
+    assert worked is True
+    row = await test_database.fetch_outbox_row(job_id)
+    assert row["status"] == "done"  # partial result, not dead_letter
+    memories = await memory_store.list_memories(pool, str(user_id))
+    assert len(memories) == 1
+    assert memories[0]["content"] == "promoted to senior engineer at Acme"
 
 
 @pytest.mark.asyncio

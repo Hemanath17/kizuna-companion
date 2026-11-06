@@ -23,6 +23,7 @@ from typing import Literal
 
 import asyncpg
 from pydantic import BaseModel
+from pydantic_ai.exceptions import UsageLimitExceeded
 
 from providers import OpenAIProvider, ProviderInterface
 from token_trace import TokenTrace
@@ -43,7 +44,18 @@ EMOTION_NODE = "tag_emotion"
 # per-entry cap on total committed proposals.
 _CHARS_PER_TOKEN = 4  # same no-tokenizer heuristic as context_builder.py
 JOURNAL_CHUNK_TARGET_TOKENS = 450
-JOURNAL_CHUNK_TOOL_CALLS_LIMIT = 3
+# Was 3, measured against a scripted oracle in unit tests only. Against the
+# real model (Step 4.6), a chunk with 2-3 distinct facts that converges
+# normally needs ~5 tool calls (searches/get-recent + the final answer), so 3
+# was too tight even for the common case, not just an edge case. But the real
+# model is also not reliably convergent: the same 2-fact input needed 47 tool
+# calls on one run and 5 on another, and a 4-fact chunk spiralled past 80
+# without ever producing a final answer. No fixed number eliminates that
+# risk, so 10 (2x headroom over the typical ~5-call convergence) is set to
+# absorb normal variance cheaply, while graceful degradation below -- not a
+# bigger number -- is what actually protects against the non-convergent
+# cases.
+JOURNAL_CHUNK_TOOL_CALLS_LIMIT = 10
 JOURNAL_PROPOSAL_CAP = 10
 
 
@@ -245,7 +257,8 @@ async def handle_journal_memory_extraction(pool: asyncpg.Pool, provider: Provide
 
     chunks = [chunk for chunk in _chunk_journal_body(row["body"]) if is_fact_bearing(chunk)]
     total_committed = 0
-    for chunk in chunks:
+    truncated_chunks = 0
+    for chunk_index, chunk in enumerate(chunks):
         if total_committed >= JOURNAL_PROPOSAL_CAP:
             logger.info(
                 "journal_memory_extraction_cap_hit entry_id=%s cap=%d committed=%d",
@@ -253,9 +266,31 @@ async def handle_journal_memory_extraction(pool: asyncpg.Pool, provider: Provide
             )
             break
 
-        proposals = await propose_memory_ops(
-            pool, job.user_id, provider, chunk, tool_calls_limit=JOURNAL_CHUNK_TOOL_CALLS_LIMIT
-        )
+        # The real model's tool-calling behavior per chunk is not reliably
+        # convergent (Step 4.6/4.7 measurement): a chunk can exceed
+        # JOURNAL_CHUNK_TOOL_CALLS_LIMIT no matter how high it's set. Under
+        # pydantic_ai's single-final-answer design, no partial proposals
+        # exist yet when that happens (the structured output is only
+        # produced on a successful final call), so there is nothing to
+        # commit for THIS chunk -- but letting the exception propagate used
+        # to abort the whole job, silently losing every other chunk's facts
+        # too and burning all 5 retry attempts into dead_letter on a chunk
+        # that will fail the same way every time. Catching it here instead
+        # logs the loss explicitly and keeps processing the entry's
+        # remaining chunks, so a partial result replaces a silent total one.
+        try:
+            proposals = await propose_memory_ops(
+                pool, job.user_id, provider, chunk, tool_calls_limit=JOURNAL_CHUNK_TOOL_CALLS_LIMIT
+            )
+        except UsageLimitExceeded as exc:
+            truncated_chunks += 1
+            logger.warning(
+                "journal_memory_extraction_chunk_truncated entry_id=%s chunk_index=%d "
+                "chunk_chars=%d limit=%d error=%s",
+                job.turn_id, chunk_index, len(chunk), JOURNAL_CHUNK_TOOL_CALLS_LIMIT, exc,
+            )
+            continue
+
         # The user wrote every word of a journal entry themselves: source_kind
         # is forced to 'stated' regardless of what the agent proposed
         # (PLAN.md Phase 4 decision 7) -- the same deterministic-override
@@ -269,8 +304,8 @@ async def handle_journal_memory_extraction(pool: asyncpg.Pool, provider: Provide
         total_committed += sum(1 for d in decisions if d.accepted)
 
     logger.info(
-        "journal_memory_extraction_committed entry_id=%s chunks=%d committed=%d",
-        job.turn_id, len(chunks), total_committed,
+        "journal_memory_extraction_committed entry_id=%s chunks=%d committed=%d truncated_chunks=%d",
+        job.turn_id, len(chunks), total_committed, truncated_chunks,
     )
 
 

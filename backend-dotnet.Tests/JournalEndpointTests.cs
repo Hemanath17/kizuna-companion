@@ -57,6 +57,30 @@ public sealed class JournalEndpointTests
         Assert.Equal(1, await fixture.FetchOutboxForSubjectAsync(entryId)); // never enqueued twice
     }
 
+    // Step 4.5 live-verification finding: a freshly signed-up user (an
+    // auth.users row with no profiles row yet, since the frontend never
+    // calls /me) must succeed on the first write wherever it lands, not just
+    // when it happens to hit /me first.
+    [Fact]
+    public async Task Post_Succeeds_ForFreshlySignedUpUser_WithNoPriorProfileRow()
+    {
+        await using var fixture = await JournalTestFixture.CreateAsync();
+        var userId = Guid.NewGuid();
+        await fixture.Database.SeedAuthUserAsync(userId); // no SeedProfileAsync
+        var client = fixture.AuthorizedClient(userId);
+
+        var response = await client.PostAsJsonAsync(
+            "/journal", new { body = "First entry ever.", mood = (string?)null, idempotency_key = "fresh-user-key" });
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+
+        await using var connection = new NpgsqlConnection(fixture.Database.AdoConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "select count(*) from profiles where id = @id";
+        command.Parameters.AddWithValue("id", userId);
+        Assert.Equal(1L, await command.ExecuteScalarAsync());
+    }
+
     [Fact]
     public async Task Get_ListsEntriesNewestFirst()
     {

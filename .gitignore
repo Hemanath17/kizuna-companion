@@ -56,6 +56,9 @@ htmlcov/
 # Eval run artifacts (generated; the labeled datasets in eval/data/ are kept)
 agent-python/eval/runs/
 
+# Phase 4 Step 4.5: live browser verification scaffolding (not product code)
+e2e/
+
 # Cursor / generated assets
 .cursor/
 assets/

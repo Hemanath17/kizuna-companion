@@ -67,6 +67,36 @@ public sealed class ChatEndToEndTests : IClassFixture<ChatE2EFixture>
         Assert.Equal(2, await _fixture.Database.CountOutboxRowsAsync(turnId));
     }
 
+    // Step 4.5 live-verification finding: EnsureProfileAsync used to run only
+    // inside /me, which the frontend never calls -- a freshly signed-up
+    // user's first write hit a profiles FK violation and 500'd if it landed
+    // on /chat (or /journal, or /reflections) before /me. The middleware fix
+    // in Program.cs must guarantee this succeeds regardless of which
+    // endpoint is hit first.
+    [Fact]
+    public async Task FirstTurn_Succeeds_ForFreshlySignedUpUser_WithNoPriorProfileRow()
+    {
+        var userId = Guid.NewGuid();
+        await _fixture.Database.SeedAuthUserAsync(userId); // no SeedProfileAsync
+        var token = _fixture.Jwt.CreateToken(subject: userId.ToString(), email: "fresh-chat-user@example.com");
+
+        var client = _fixture.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.PostAsync("/chat", ChatBody(null, "hello, this is my first message ever", "fresh-user-key"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("event: done", body);
+
+        await using var connection = new NpgsqlConnection(_fixture.Database.AdoConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "select count(*) from profiles where id = @id";
+        command.Parameters.AddWithValue("id", userId);
+        Assert.Equal(1L, await command.ExecuteScalarAsync());
+    }
+
     [Fact]
     public async Task DuplicateIdempotencyKey_YieldsOneTurn_SecondCallReturnsExistingStatus()
     {
